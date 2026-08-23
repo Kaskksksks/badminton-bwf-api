@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.api.v1.routes import router as v1_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.base import get_db
 from app.health.service import build_data_status_payload, build_health_payload
 from app.polling.scheduler import build_scheduler
-from app.api.v1.routes import router as v1_router
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -44,6 +46,22 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
+
+
+@app.exception_handler(SQLAlchemyError)
+async def database_error_handler(_: Request, exc: SQLAlchemyError) -> JSONResponse:
+    """Avoid opaque 500 responses when the database is unavailable or unmigrated."""
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": "30"},
+        content={
+            "detail": {
+                "code": "database_schema_or_connection_error",
+                "error": type(exc).__name__,
+            },
+            "meta": {"api_version": "v1"},
+        },
+    )
 
 
 @app.get("/", tags=["service"])
