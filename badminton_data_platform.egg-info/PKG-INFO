@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: badminton-data-platform
+Version: 0.1.0
+Summary: Provenance-aware badminton historical data platform and BWF ingestion API
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi<1.0,>=0.115
+Requires-Dist: uvicorn[standard]<1.0,>=0.30
+Requires-Dist: sqlalchemy<3.0,>=2.0
+Requires-Dist: alembic<2.0,>=1.13
+Requires-Dist: psycopg[binary]<4.0,>=3.2
+Requires-Dist: pydantic<3.0,>=2.8
+Requires-Dist: pydantic-settings<3.0,>=2.4
+Requires-Dist: httpx<1.0,>=0.27
+Requires-Dist: apscheduler<4.0,>=3.10
+Requires-Dist: python-json-logger<4.0,>=2.0
+Provides-Extra: test
+Requires-Dist: pytest<9.0,>=8.0; extra == "test"
+Requires-Dist: pytest-cov<7.0,>=5.0; extra == "test"
