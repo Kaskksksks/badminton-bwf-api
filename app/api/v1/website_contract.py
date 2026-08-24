@@ -147,6 +147,40 @@ class WebsitePlayerListResponse(ContractModel):
     meta: ApiMeta
 
 
+class WebsiteRankingEntry(ContractModel):
+    ranking_position: int = Field(ge=1)
+    points: int | None = Field(default=None, ge=0)
+    tournament_count: int | None = Field(default=None, ge=0)
+    rank_change: int | None = None
+    subject_kind: Literal["PLAYER", "PAIR"]
+    subject_display_name: str
+    official_subject_id: str | None = None
+    country_code: str | None = None
+    platform_player_id: str | None = None
+    identity_status: str
+
+
+class RankingSnapshotMeta(ContractModel):
+    ranking_system: Literal["WORLD", "WORLD_TOUR", "WORLD_JUNIOR"]
+    population: Literal["SENIOR", "JUNIOR_YOUTH"]
+    discipline: Literal["MS", "WS", "MD", "WD", "XD"]
+    effective_date: str
+    published_week: str | None = None
+    retrieved_at: datetime
+    source_url: str
+    content_hash: str
+    snapshot_status: Literal["COMPLETE"]
+    issue_summary: str | None = None
+
+
+class WebsiteRankingListResponse(ContractModel):
+    data: list[WebsiteRankingEntry]
+    pagination: PageInfo
+    snapshot: RankingSnapshotMeta | None = None
+    issues: list[str] = Field(default_factory=list)
+    meta: ApiMeta
+
+
 class CapabilityResponse(ContractModel):
     data: dict[str, object]
     meta: ApiMeta

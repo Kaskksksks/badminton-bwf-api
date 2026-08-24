@@ -18,6 +18,8 @@ from app.db.models import (
     Participant,
     ParticipantMember,
     Player,
+    RankingEntry,
+    RankingSnapshot,
     Tournament,
     TournamentClassification,
 )
@@ -37,6 +39,9 @@ from app.api.v1.website_contract import (
     WebsiteMatchResponse,
     WebsitePlayer,
     WebsitePlayerListResponse,
+    WebsiteRankingEntry,
+    WebsiteRankingListResponse,
+    RankingSnapshotMeta,
     WebsiteTournamentListResponse,
 )
 
@@ -328,11 +333,76 @@ def list_players(
     return WebsitePlayerListResponse(data=data, pagination=PageInfo(page=page, page_size=page_size, total=total), meta=metadata("BWF_LIVE_AND_RESOLVED_IDENTITIES"))
 
 
+@router.get("/rankings", response_model=WebsiteRankingListResponse)
+def list_rankings(
+    session: Session = Depends(get_db),
+    ranking_system: Literal["WORLD", "WORLD_TOUR", "WORLD_JUNIOR"] = Query("WORLD"),
+    discipline: Literal["MS", "WS", "MD", "WD", "XD"] = Query("MS"),
+    effective_date: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+) -> WebsiteRankingListResponse:
+    query = select(RankingSnapshot).where(
+        RankingSnapshot.ranking_system == ranking_system,
+        RankingSnapshot.discipline == discipline,
+        RankingSnapshot.snapshot_status == "COMPLETE",
+    )
+    if effective_date:
+        query = query.where(RankingSnapshot.effective_date == effective_date)
+    snapshot = session.scalar(query.order_by(RankingSnapshot.effective_date.desc(), RankingSnapshot.retrieved_at.desc()))
+    if not snapshot:
+        return WebsiteRankingListResponse(
+            data=[],
+            pagination=PageInfo(page=page, page_size=page_size, total=0),
+            issues=["ranking_snapshot_unavailable"],
+            meta=metadata("BWF_OFFICIAL_RANKINGS"),
+        )
+    entry_query = select(RankingEntry).where(RankingEntry.snapshot_id == snapshot.id)
+    total = session.scalar(select(func.count()).select_from(entry_query.subquery())) or 0
+    rows = session.scalars(
+        entry_query.order_by(RankingEntry.ranking_position, RankingEntry.subject_display_name)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return WebsiteRankingListResponse(
+        data=[
+            WebsiteRankingEntry(
+                ranking_position=item.ranking_position,
+                points=item.points,
+                tournament_count=item.tournament_count,
+                rank_change=item.rank_change,
+                subject_kind=item.subject_kind,
+                subject_display_name=item.subject_display_name,
+                official_subject_id=item.official_subject_id,
+                country_code=item.country_code,
+                platform_player_id=item.platform_player_id,
+                identity_status=item.identity_status,
+            )
+            for item in rows
+        ],
+        pagination=PageInfo(page=page, page_size=page_size, total=total),
+        snapshot=RankingSnapshotMeta(
+            ranking_system=snapshot.ranking_system,
+            population=snapshot.population,
+            discipline=snapshot.discipline,
+            effective_date=snapshot.effective_date.isoformat(),
+            published_week=snapshot.published_week,
+            retrieved_at=snapshot.retrieved_at,
+            source_url=snapshot.source_url,
+            content_hash=snapshot.content_hash,
+            snapshot_status=snapshot.snapshot_status,
+            issue_summary=snapshot.issue_summary,
+        ),
+        meta=metadata("BWF_OFFICIAL_RANKINGS"),
+    )
+
+
 @router.get("/capabilities", response_model=CapabilityResponse)
-def capabilities() -> CapabilityResponse:
+def capabilities(session: Session = Depends(get_db)) -> CapabilityResponse:
+    rankings_available = bool(session.scalar(select(func.count()).select_from(RankingSnapshot)))
     return CapabilityResponse(
         data={
-            "rankings": {"available": False, "reason": "not_yet_ingested"},
+            "rankings": ({"available": True, "source": "BWF_OFFICIAL_RANKINGS"} if rankings_available else {"available": False, "reason": "not_yet_ingested"}),
             "draws": {"available": False, "reason": "not_exposed_by_provider"},
             "point_events": {"available": False, "reason": "not_exposed_by_provider"},
             "predictions": {"available": False, "reason": "no_validated_model_contract"},

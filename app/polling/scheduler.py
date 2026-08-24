@@ -5,13 +5,16 @@ from datetime import datetime, timezone
 from typing import Mapping
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import Settings, get_settings
 from app.db.base import SessionLocal
 from app.ingestion.adapters.bwf.service import synchronize_current_bwf
+from app.ingestion.rankings.service import run_rankings_job
 
 logger = logging.getLogger(__name__)
 JOB_ID = "bwf-sync"
+RANKINGS_JOB_ID = "bwf-rankings-weekly"
 
 
 def interval_for_sync_result(settings: Settings, result: Mapping[str, int | str]) -> tuple[int, str]:
@@ -64,4 +67,21 @@ def build_scheduler() -> BackgroundScheduler:
         # intervals are set from confirmed live/current/idle source state.
         next_run_time=datetime.now(timezone.utc),
     )
+    # Rankings are a distinct source and cadence. This fixed weekly job never
+    # reschedules, delays, or otherwise alters the adaptive live polling job.
+    if settings.bwf_rankings_enabled and settings.bwf_rankings_scheduler_enabled:
+        scheduler.add_job(
+            run_rankings_job,
+            trigger=CronTrigger(
+                day_of_week=settings.bwf_rankings_run_day_of_week,
+                hour=settings.bwf_rankings_run_hour_utc,
+                minute=settings.bwf_rankings_run_minute_utc,
+                timezone="UTC",
+            ),
+            id=RANKINGS_JOB_ID,
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=6 * 60 * 60,
+        )
     return scheduler

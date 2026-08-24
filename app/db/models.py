@@ -21,6 +21,7 @@ def uuid_str() -> str:
 class SourceKind(str, Enum):
     HISTORICAL_SEED = "HISTORICAL_SEED"
     BWF_LIVE = "BWF_LIVE"
+    BWF_RANKINGS = "BWF_RANKINGS"
     MANUAL = "MANUAL"
 
 
@@ -190,6 +191,59 @@ class ReconciliationCase(UUIDMixin, TimestampMixin, Base):
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class RankingSnapshot(UUIDMixin, TimestampMixin, Base):
+    """Immutable, source-versioned official ranking scope."""
+
+    __tablename__ = "ranking_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "ranking_system", "discipline", "effective_date", "content_hash", name="ranking_snapshots_scope_hash"
+        ),
+        Index("ix_ranking_snapshots_scope_date", "ranking_system", "discipline", "effective_date"),
+    )
+
+    source_id: Mapped[str] = mapped_column(ForeignKey("data_sources.id"), nullable=False, index=True)
+    import_batch_id: Mapped[str] = mapped_column(ForeignKey("import_batches.id"), nullable=False, index=True)
+    source_record_id: Mapped[str | None] = mapped_column(ForeignKey("raw_ingestion_records.id"), index=True)
+    ranking_system: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    population: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    discipline: Mapped[str] = mapped_column(String(8), nullable=False, index=True)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    published_week: Mapped[str | None] = mapped_column(String(64))
+    source_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_status: Mapped[str] = mapped_column(String(32), nullable=False, default="COMPLETE")
+    entry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    issue_summary: Mapped[str | None] = mapped_column(Text)
+
+
+class RankingEntry(UUIDMixin, TimestampMixin, Base):
+    """An official player or pair row as published inside one ranking snapshot."""
+
+    __tablename__ = "ranking_entries"
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "ranking_position", "subject_key", name="ranking_entries_snapshot_position_subject"),
+        Index("ix_ranking_entries_snapshot_position", "snapshot_id", "ranking_position"),
+        Index("ix_ranking_entries_official_id", "official_subject_id"),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(ForeignKey("ranking_snapshots.id"), nullable=False, index=True)
+    ranking_position: Mapped[int] = mapped_column(Integer, nullable=False)
+    points: Mapped[int | None] = mapped_column(Integer)
+    tournament_count: Mapped[int | None] = mapped_column(Integer)
+    rank_change: Mapped[int | None] = mapped_column(Integer)
+    subject_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    subject_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    subject_display_name: Mapped[str] = mapped_column(String(1024), nullable=False)
+    official_subject_id: Mapped[str | None] = mapped_column(String(512))
+    country_code: Mapped[str | None] = mapped_column(String(8))
+    platform_player_id: Mapped[str | None] = mapped_column(ForeignKey("players.id"), index=True)
+    identity_status: Mapped[str] = mapped_column(String(32), nullable=False, default=IdentityStatus.UNRESOLVED.value)
+    source_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
 class Player(UUIDMixin, TimestampMixin, Base):

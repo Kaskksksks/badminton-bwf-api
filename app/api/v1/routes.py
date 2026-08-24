@@ -19,6 +19,8 @@ from app.db.models import (
     Participant,
     Player,
     RecordLineage,
+    RankingEntry,
+    RankingSnapshot,
     Tournament,
 )
 from app.statistics.service import interval_coverage_summary, interval_metrics_for_participant
@@ -122,8 +124,72 @@ def get_player_statistics(player_id: str, session: DbSession) -> dict[str, Any]:
 
 
 @router.get("/rankings")
-def get_rankings(session: DbSession, event: str | None = None) -> dict[str, Any]:
-    return {"data": [], "meta": {**meta(), "event": event, "status": "NOT_YET_INGESTED"}}
+def get_rankings(
+    session: DbSession,
+    ranking_system: str = Query("WORLD", pattern="^(WORLD|WORLD_TOUR|WORLD_JUNIOR)$"),
+    discipline: str = Query("MS", pattern="^(MS|WS|MD|WD|XD)$"),
+    effective_date: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Read a stored official ranking snapshot; this endpoint never calls BWF."""
+    query = select(RankingSnapshot).where(
+        RankingSnapshot.ranking_system == ranking_system,
+        RankingSnapshot.discipline == discipline,
+        RankingSnapshot.snapshot_status == "COMPLETE",
+    )
+    if effective_date:
+        query = query.where(RankingSnapshot.effective_date == effective_date)
+    snapshot = session.scalar(query.order_by(desc(RankingSnapshot.effective_date), desc(RankingSnapshot.retrieved_at)))
+    if not snapshot:
+        return {
+            "data": [],
+            "pagination": {"page": page, "page_size": page_size, "total": 0},
+            "meta": {
+                **meta("BWF_OFFICIAL_RANKINGS"),
+                "ranking_system": ranking_system,
+                "discipline": discipline,
+                "status": "NOT_YET_INGESTED",
+            },
+        }
+    entry_query = select(RankingEntry).where(RankingEntry.snapshot_id == snapshot.id)
+    total = len(session.scalars(entry_query).all())
+    entries = session.scalars(
+        entry_query.order_by(RankingEntry.ranking_position, RankingEntry.subject_display_name)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "data": [
+            {
+                "ranking_position": item.ranking_position,
+                "points": item.points,
+                "tournament_count": item.tournament_count,
+                "rank_change": item.rank_change,
+                "subject_kind": item.subject_kind,
+                "subject_display_name": item.subject_display_name,
+                "official_subject_id": item.official_subject_id,
+                "country_code": item.country_code,
+                "platform_player_id": item.platform_player_id,
+                "identity_status": item.identity_status,
+            }
+            for item in entries
+        ],
+        "pagination": {"page": page, "page_size": page_size, "total": total},
+        "meta": {
+            **meta("BWF_OFFICIAL_RANKINGS"),
+            "ranking_system": snapshot.ranking_system,
+            "population": snapshot.population,
+            "discipline": snapshot.discipline,
+            "effective_date": snapshot.effective_date.isoformat(),
+            "published_week": snapshot.published_week,
+            "retrieved_at": snapshot.retrieved_at.isoformat(),
+            "source_url": snapshot.source_url,
+            "content_hash": snapshot.content_hash,
+            "snapshot_status": snapshot.snapshot_status,
+            "issue_summary": snapshot.issue_summary,
+        },
+    }
 
 
 @router.get("/tournaments")

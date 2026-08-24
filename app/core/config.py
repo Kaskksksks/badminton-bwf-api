@@ -49,6 +49,32 @@ class Settings(BaseSettings):
     raw_deduplicate_unchanged: bool = True
     seed_dataset_root: Path = Path("/data/historical_dataset/bwf_match_data_2010_2026_08_22")
 
+    # Ranking collection is intentionally opt-in. It must remain disabled until
+    # the deployment has the required BWF permission or data licence in place.
+    bwf_rankings_enabled: bool = False
+    bwf_rankings_base_url: str = "https://extranet-lv.bwfbadminton.com"
+    bwf_rankings_request_timeout_seconds: int = Field(default=30, ge=1, le=120)
+    bwf_rankings_user_agent: str = "BadmintonDataPlatform/0.1 (authorised rankings collection; contact required)"
+    bwf_rankings_page_size: int = Field(default=100, ge=10, le=100)
+    bwf_rankings_max_pages_per_scope: int = Field(default=100, ge=1, le=500)
+    bwf_rankings_scheduler_enabled: bool = False
+    bwf_rankings_allow_live_source: bool = False
+    bwf_rankings_permission_required: bool = True
+    bwf_rankings_permission_reference: str | None = None
+    bwf_rankings_run_day_of_week: str = "tue"
+    bwf_rankings_run_hour_utc: int = Field(default=12, ge=0, le=23)
+    bwf_rankings_run_minute_utc: int = Field(default=0, ge=0, le=59)
+    bwf_rankings_max_entries_per_scope: int = Field(default=5000, ge=1, le=20000)
+    bwf_rankings_source_revision: str = "bwf-public-ranking-interface-v1"
+
+    @field_validator("bwf_rankings_permission_reference")
+    @classmethod
+    def require_ranking_permission_reference(cls, value: str | None, info: object) -> str | None:
+        data = getattr(info, "data", {})
+        if data.get("bwf_rankings_enabled") and data.get("bwf_rankings_permission_required") and not value:
+            raise ValueError("BWF_RANKINGS_PERMISSION_REFERENCE is required when BWF_RANKINGS_ENABLED=true")
+        return value
+
     api_rate_limit_per_minute: int = Field(default=120, ge=1, le=100000)
     admin_api_key: str = "replace-before-deployment"
     scheduler_enabled: bool = False
