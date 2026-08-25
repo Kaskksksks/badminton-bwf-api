@@ -7,10 +7,12 @@ resolves historical aliases only according to documented deterministic rules.
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import html
 import logging
+import os
 import re
 import time
 import unicodedata
@@ -76,6 +78,35 @@ def utcnow() -> datetime:
 
 def canonical_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def process_resident_memory_bytes() -> int | None:
+    """Return Linux resident memory when available, without making batch control depend on it."""
+    try:
+        with open("/proc/self/statm", encoding="utf-8") as handle:
+            resident_pages = int(handle.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE")
+    except (FileNotFoundError, IndexError, OSError, ValueError):
+        return None
+
+
+def checkpoint_batch_memory(session: Session, summary: Mapping[str, int], *, reason: str) -> None:
+    """Commit a bounded unit of work and release expired ORM state before continuing."""
+    session.commit()
+    session.expire_all()
+    gc.collect()
+    logger.info(
+        "player_identity_batch_checkpoint",
+        extra={
+            "reason": reason,
+            "selected": summary["selected"],
+            "confirmed_auto": summary["confirmed_auto"],
+            "conflicted": summary["conflicted"],
+            "unresolved": summary["unresolved"],
+            "errors": summary["errors"],
+            "resident_memory_bytes": process_resident_memory_bytes(),
+        },
+    )
 
 
 def normalize_name(value: str | None) -> str:
@@ -454,6 +485,8 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
             exact = [candidate for candidate in candidates if normalize_name(candidate.display_name) == normalize_name(alias.alias_text)]
             if not exact:
                 summary["unresolved"] += 1
+                if summary["selected"] % settings.bwf_player_profiles_transaction_chunk_size == 0:
+                    checkpoint_batch_memory(session, summary, reason="chunk_complete")
                 continue
             # Inspect only exact candidates; the source request interval applies to every profile.
             resolved: list[tuple[Candidate, Player, PlayerProfileSnapshot]] = []
@@ -481,12 +514,16 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
                     summary["conflicted"] += 1
                 else:
                     summary["provisional"] += 1
+            if summary["selected"] % settings.bwf_player_profiles_transaction_chunk_size == 0:
+                checkpoint_batch_memory(session, summary, reason="chunk_complete")
         batch.status = BatchStatus.FAILED.value if source_stop is not None else BatchStatus.SUCCEEDED.value
         batch.error_summary = str(source_stop) if source_stop is not None else None
         batch.completed_at = utcnow()
         batch.input_row_count = summary["selected"]
         batch.accepted_count = summary["confirmed_auto"] + summary["provisional"]
         batch.rejected_count = summary["conflicted"] + summary["unresolved"]
+        session.flush()
+        checkpoint_batch_memory(session, summary, reason="batch_complete")
         return summary
     except SourceAccessStopped as exc:
         batch.status = BatchStatus.FAILED.value

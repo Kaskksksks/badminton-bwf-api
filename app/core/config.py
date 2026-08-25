@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     bwf_player_profiles_user_agent: str = "BadmintonDataPlatform/0.1 (authorised player-profile collection)"
     bwf_player_profiles_min_request_interval_seconds: int = Field(default=2, ge=1, le=60)
     bwf_player_profiles_batch_size: int = Field(default=100, ge=1, le=500)
+    # Commit and expire ORM state in small units so an authorised batch cannot
+    # retain an entire large queue in one request transaction on low-memory hosts.
+    bwf_player_profiles_transaction_chunk_size: int = Field(default=10, ge=1, le=100)
     bwf_player_profiles_source_revision: str = "bwf-public-player-profile-v1"
     bwf_player_profiles_auto_confirm: bool = False
     bwf_player_profiles_dry_run: bool = True

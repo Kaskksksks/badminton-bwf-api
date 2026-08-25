@@ -12,6 +12,7 @@ from app.ingestion.player_profiles.service import (
     BWFPlayerProfileClient,
     Candidate,
     SourceAccessStopped,
+    SourceResponse,
     decide_alias,
     ensure_collection_allowed,
     extract_candidates,
@@ -170,6 +171,43 @@ def test_upstream_server_error_stops_collection_without_retrying() -> None:
         client.search("YU Yang (F)")
     assert captured.value.endpoint_key == "h2h-player-search"
     assert captured.value.status_code == 500
+
+
+def test_unresolved_queue_checkpoints_and_releases_session_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.ingestion.player_profiles.service as player_profile_service
+
+    class NoMatchClient:
+        def search(self, alias_text: str) -> SourceResponse:
+            return SourceResponse("h2h-player-search", f"https://example.test/search?query={alias_text}", 200, [])
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            historical = DataSource(code="HISTORICAL_CHUNK_TEST", source_kind="HISTORICAL_SEED", display_name="Historical chunk test", base_url=None)
+            session.add(historical)
+            session.flush()
+            for index in range(3):
+                session.add(PlayerAlias(source_id=historical.id, alias_text=f"No Match {index}", normalized_alias=f"NO MATCH {index}"))
+            session.commit()
+            checkpoints: list[tuple[int, str]] = []
+
+            def fake_checkpoint(active_session: Session, summary: dict[str, int], *, reason: str) -> None:
+                checkpoints.append((summary["selected"], reason))
+                active_session.commit()
+                active_session.expire_all()
+
+            monkeypatch.setattr(player_profile_service, "checkpoint_batch_memory", fake_checkpoint)
+            summary = run_full_queue(
+                session,
+                enabled_settings(bwf_player_profiles_batch_size=3, bwf_player_profiles_transaction_chunk_size=2),
+                NoMatchClient(),
+            )
+            assert summary["selected"] == 3
+            assert summary["unresolved"] == 3
+            assert checkpoints == [(2, "chunk_complete"), (3, "batch_complete")]
+    finally:
+        Base.metadata.drop_all(engine)
 
 
 def test_server_error_is_persisted_as_skipped_exception_without_raising() -> None:
