@@ -18,11 +18,16 @@ from app.db.models import (
     MatchGame,
     Participant,
     Player,
+    PlayerAlias,
+    PlayerIdentityLink,
+    ParticipantMember,
     RecordLineage,
     RankingEntry,
     RankingSnapshot,
     Tournament,
 )
+from app.core.config import get_settings
+from app.ingestion.player_profiles.service import run_full_queue
 from app.statistics.service import interval_coverage_summary, interval_metrics_for_participant
 
 router = APIRouter(tags=["v1"])
@@ -190,6 +195,69 @@ def get_rankings(
             "issue_summary": snapshot.issue_summary,
         },
     }
+
+
+@router.get("/admin/identity/coverage", dependencies=[Depends(require_admin)])
+def identity_coverage(session: DbSession) -> dict[str, Any]:
+    aliases = session.scalars(select(PlayerAlias)).all()
+    links = session.scalars(select(PlayerIdentityLink)).all()
+    return {
+        "data": {
+            "aliases_total": len(aliases),
+            "aliases_confirmed": sum(item.player_id is not None and item.resolution_status == "CONFIRMED" for item in aliases),
+            "aliases_unresolved": sum(item.player_id is None and item.resolution_status == "UNRESOLVED" for item in aliases),
+            "aliases_conflicted": sum(item.resolution_status == "CONFLICTED" for item in aliases),
+            "automated_links": sum(item.decision_status == "CONFIRMED_AUTO" for item in links),
+            "provisional_links": sum(item.decision_status == "PROVISIONAL_AUTO" for item in links),
+            "rejected_links": sum(item.decision_status == "REJECTED_MANUAL" for item in links),
+            "model_safe_identity_status": "CONFIRMED_ONLY",
+        },
+        "meta": {**meta("BWF_OFFICIAL_PLAYER_PROFILES"), "notice": "Only confirmed aliases are eligible for verified player statistics and models."},
+    }
+
+
+@router.get("/admin/identity/review-queue", dependencies=[Depends(require_admin)])
+def identity_review_queue(session: DbSession, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+    query = select(PlayerIdentityLink).where(PlayerIdentityLink.decision_status.in_(("CONFLICTED", "PROVISIONAL_AUTO")))
+    total = len(session.scalars(query).all())
+    rows = session.scalars(query.order_by(desc(PlayerIdentityLink.decided_at)).offset((page - 1) * page_size).limit(page_size)).all()
+    return page_payload([
+        {"link_id": row.id, "alias_id": row.alias_id, "player_id": row.player_id, "status": row.decision_status,
+         "decision_class": row.decision_class, "score": row.score, "rationale": row.rationale, "evidence": row.evidence}
+        for row in rows
+    ], page, page_size, total, "BWF_OFFICIAL_PLAYER_PROFILES")
+
+
+@router.post("/admin/identity/run", dependencies=[Depends(require_admin)])
+def run_identity_batch(session: DbSession) -> dict[str, Any]:
+    """Start one explicitly requested, bounded identity batch; it has no scheduler."""
+    summary = run_full_queue(session, get_settings())
+    session.commit()
+    return {"data": summary, "meta": meta("BWF_OFFICIAL_PLAYER_PROFILES")}
+
+
+@router.post("/admin/identity/links/{link_id}/review", dependencies=[Depends(require_admin)])
+def review_identity_link(link_id: str, session: DbSession, action: str = Query(..., pattern="^(ACCEPT|REJECT)$")) -> dict[str, Any]:
+    link = session.get(PlayerIdentityLink, link_id)
+    if not link:
+        raise HTTPException(status_code=404, detail="Identity link not found")
+    alias = session.get(PlayerAlias, link.alias_id)
+    if not alias:
+        raise HTTPException(status_code=409, detail="Identity alias no longer exists")
+    if action == "ACCEPT":
+        alias.player_id = link.player_id
+        alias.resolution_status = "CONFIRMED"
+        link.decision_status = "ACCEPTED_MANUAL"
+        for member in session.scalars(select(ParticipantMember).where(ParticipantMember.source_alias_id == alias.id)).all():
+            member.player_id = link.player_id
+    else:
+        link.decision_status = "REJECTED_MANUAL"
+        link.decision_class = "NEGATIVE_EVIDENCE"
+        alias.resolution_status = "CONFLICTED"
+    link.reviewed_at = datetime.now(timezone.utc)
+    link.reviewed_by = "ADMIN_API"
+    session.commit()
+    return {"data": {"link_id": link.id, "decision_status": link.decision_status}, "meta": meta("BWF_OFFICIAL_PLAYER_PROFILES")}
 
 
 @router.get("/tournaments")

@@ -288,6 +288,53 @@ class PlayerAlias(UUIDMixin, TimestampMixin, Base):
     resolution_status: Mapped[str] = mapped_column(String(32), default=IdentityStatus.UNRESOLVED.value, nullable=False)
 
 
+class PlayerProfileSnapshot(UUIDMixin, TimestampMixin, Base):
+    """Immutable authorised BWF profile evidence for a stable BWF profile ID."""
+
+    __tablename__ = "player_profile_snapshots"
+    __table_args__ = (
+        UniqueConstraint("source_id", "bwf_profile_id", "content_hash", name="player_profile_snapshots_unique"),
+        Index("ix_player_profile_snapshots_profile_retrieved", "bwf_profile_id", "retrieved_at"),
+    )
+
+    source_id: Mapped[str] = mapped_column(ForeignKey("data_sources.id"), nullable=False, index=True)
+    source_record_id: Mapped[str | None] = mapped_column(ForeignKey("raw_ingestion_records.id"), index=True)
+    bwf_profile_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    profile_name: Mapped[str] = mapped_column(String(512), nullable=False)
+    country_code: Mapped[str | None] = mapped_column(String(8))
+    date_of_birth: Mapped[date | None] = mapped_column(Date)
+    profile_type: Mapped[str | None] = mapped_column(String(64))
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class PlayerIdentityLink(UUIDMixin, TimestampMixin, Base):
+    """An auditable alias-to-canonical-player identity decision."""
+
+    __tablename__ = "player_identity_links"
+    __table_args__ = (
+        UniqueConstraint("alias_id", "player_id", "resolver_version", name="player_identity_links_unique"),
+        Index("ix_player_identity_links_status", "decision_status", "decision_class"),
+    )
+
+    alias_id: Mapped[str] = mapped_column(ForeignKey("player_aliases.id"), nullable=False, index=True)
+    player_id: Mapped[str] = mapped_column(ForeignKey("players.id"), nullable=False, index=True)
+    profile_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("player_profile_snapshots.id"), index=True)
+    decision_status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    decision_class: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolver_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence: Mapped[dict] = mapped_column(JSON, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    decided_by: Mapped[str] = mapped_column(String(255), nullable=False, default="AUTOMATED")
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+
+
 class Tournament(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "tournaments"
 

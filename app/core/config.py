@@ -67,6 +67,29 @@ class Settings(BaseSettings):
     bwf_rankings_max_entries_per_scope: int = Field(default=5000, ge=1, le=20000)
     bwf_rankings_source_revision: str = "bwf-public-ranking-interface-v1"
 
+    # Player-profile collection is separate from rankings and remains disabled
+    # until an authorised source reference and controlled dry run are configured.
+    bwf_player_profiles_enabled: bool = False
+    bwf_player_profiles_allow_live_source: bool = False
+    bwf_player_profiles_permission_required: bool = True
+    bwf_player_profiles_permission_reference: str | None = None
+    bwf_player_profiles_base_url: str = "https://extranet-lv.bwfbadminton.com"
+    bwf_player_profiles_request_timeout_seconds: int = Field(default=30, ge=1, le=120)
+    bwf_player_profiles_user_agent: str = "BadmintonDataPlatform/0.1 (authorised player-profile collection)"
+    bwf_player_profiles_min_request_interval_seconds: int = Field(default=2, ge=1, le=60)
+    bwf_player_profiles_batch_size: int = Field(default=100, ge=1, le=500)
+    bwf_player_profiles_source_revision: str = "bwf-public-player-profile-v1"
+    bwf_player_profiles_auto_confirm: bool = False
+    bwf_player_profiles_dry_run: bool = True
+
+    @field_validator("bwf_player_profiles_permission_reference")
+    @classmethod
+    def require_player_profile_permission_reference(cls, value: str | None, info: object) -> str | None:
+        data = getattr(info, "data", {})
+        if data.get("bwf_player_profiles_enabled") and data.get("bwf_player_profiles_permission_required") and not value:
+            raise ValueError("BWF_PLAYER_PROFILES_PERMISSION_REFERENCE is required when BWF_PLAYER_PROFILES_ENABLED=true")
+        return value
+
     @field_validator("bwf_rankings_permission_reference")
     @classmethod
     def require_ranking_permission_reference(cls, value: str | None, info: object) -> str | None:

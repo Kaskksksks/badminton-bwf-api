@@ -16,8 +16,20 @@ branch_labels = None
 depends_on = None
 
 
+# This migration originally relied on the current model registry. Keep the
+# initial-schema behavior stable for fresh installs by excluding tables created
+# by later revisions; already-deployed databases do not re-run this revision.
+LATER_REVISION_TABLES = {
+    "ranking_snapshots",
+    "ranking_entries",
+    "player_profile_snapshots",
+    "player_identity_links",
+}
+
+
 def upgrade() -> None:
-    Base.metadata.create_all(bind=op.get_bind())
+    initial_tables = [table for name, table in Base.metadata.tables.items() if name not in LATER_REVISION_TABLES]
+    Base.metadata.create_all(bind=op.get_bind(), tables=initial_tables)
 
 
 def downgrade() -> None:
