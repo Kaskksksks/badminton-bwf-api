@@ -26,6 +26,7 @@ from app.db.models import (
     Tournament,
 )
 from app.ingestion.adapters.bwf.client import BWFClient, BWFResponse
+from app.ingestion.adapters.bwf.eligibility import is_paralympic_match, is_paralympic_tournament
 from app.snapshots.service import record_game_state
 
 PARSER_VERSION = "bwf-match-centre-v1"
@@ -299,18 +300,34 @@ def synchronize_current_bwf(session: Session, client: BWFClient | None = None, s
     tournaments_response = client.list_current_tournaments()
     tournament_raw = capture_response(session, source, tournaments_response)
     live_match_count = 0
+    eligible_tournament_count = 0
+    skipped_paralympic_tournament_count = 0
+    skipped_paralympic_match_count = 0
     tournaments = tournaments_response.payload.get("results") or []
     for tournament_payload in tournaments:
         if not isinstance(tournament_payload, dict) or tournament_payload.get("id") is None:
             continue
+        if is_paralympic_tournament(tournament_payload):
+            skipped_paralympic_tournament_count += 1
+            continue
+        eligible_tournament_count += 1
         tournament = upsert_tournament(session, source, tournament_payload, tournament_raw)
         live_response = client.list_live_matches(tournament_payload["id"])
         live_raw = capture_response(session, source, live_response, source_record_key=str(tournament_payload["id"]))
         for envelope in live_response.payload.get("results") or []:
             if not isinstance(envelope, dict):
                 continue
+            if is_paralympic_match(envelope):
+                skipped_paralympic_match_count += 1
+                continue
             upsert_live_match(session, source, tournament, envelope, live_raw)
             live_match_count += 1
     if owned_client:
         client.close()
-    return {"status": "ok", "tournaments": len(tournaments), "live_matches": live_match_count}
+    return {
+        "status": "ok",
+        "tournaments": eligible_tournament_count,
+        "live_matches": live_match_count,
+        "skipped_paralympic_tournaments": skipped_paralympic_tournament_count,
+        "skipped_paralympic_matches": skipped_paralympic_match_count,
+    }
