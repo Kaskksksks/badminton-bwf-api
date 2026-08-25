@@ -21,13 +21,18 @@ from app.db.models import (
     PlayerAlias,
     PlayerIdentityLink,
     ParticipantMember,
+    ReconciliationCase,
     RecordLineage,
     RankingEntry,
     RankingSnapshot,
     Tournament,
 )
 from app.core.config import get_settings
-from app.ingestion.player_profiles.service import run_full_queue
+from app.ingestion.player_profiles.service import (
+    NO_EXACT_CANDIDATE_CASE_TYPE,
+    RESOLVER_VERSION,
+    run_full_queue,
+)
 from app.statistics.service import interval_coverage_summary, interval_metrics_for_participant
 
 router = APIRouter(tags=["v1"])
@@ -201,6 +206,26 @@ def get_rankings(
 def identity_coverage(session: DbSession) -> dict[str, Any]:
     aliases = session.scalars(select(PlayerAlias)).all()
     links = session.scalars(select(PlayerIdentityLink)).all()
+    terminal_no_exact_alias_ids = set(session.scalars(select(ReconciliationCase.candidate_entity_id).where(
+        ReconciliationCase.case_type == NO_EXACT_CANDIDATE_CASE_TYPE,
+        ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+        ReconciliationCase.status == "OPEN",
+    )).all())
+    source_error_alias_ids = set(session.scalars(select(ReconciliationCase.candidate_entity_id).where(
+        ReconciliationCase.case_type == "PLAYER_IDENTITY_SOURCE_ERROR",
+        ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+        ReconciliationCase.status == "OPEN",
+    )).all())
+    resolver_link_alias_ids = set(session.scalars(select(PlayerIdentityLink.alias_id).where(
+        PlayerIdentityLink.resolver_version == RESOLVER_VERSION,
+    )).all())
+    eligible_queue_remaining = sum(
+        item.player_id is None
+        and item.id not in resolver_link_alias_ids
+        and item.id not in terminal_no_exact_alias_ids
+        and item.id not in source_error_alias_ids
+        for item in aliases
+    )
     return {
         "data": {
             "aliases_total": len(aliases),
@@ -210,9 +235,13 @@ def identity_coverage(session: DbSession) -> dict[str, Any]:
             "automated_links": sum(item.decision_status == "CONFIRMED_AUTO" for item in links),
             "provisional_links": sum(item.decision_status == "PROVISIONAL_AUTO" for item in links),
             "rejected_links": sum(item.decision_status == "REJECTED_MANUAL" for item in links),
+            "aliases_no_exact_candidate": len(terminal_no_exact_alias_ids),
+            "aliases_source_error_quarantined": len(source_error_alias_ids),
+            "eligible_queue_remaining": eligible_queue_remaining,
+            "queue_complete": eligible_queue_remaining == 0,
             "model_safe_identity_status": "CONFIRMED_ONLY",
         },
-        "meta": {**meta("BWF_OFFICIAL_PLAYER_PROFILES"), "notice": "Only confirmed aliases are eligible for verified player statistics and models."},
+        "meta": {**meta("BWF_OFFICIAL_PLAYER_PROFILES"), "notice": "Only confirmed aliases are eligible for verified player statistics and models. Queue completion means every alias is confirmed, conflicted, no-exact-candidate, or source-error quarantined."},
     }
 
 

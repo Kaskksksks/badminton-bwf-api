@@ -5,12 +5,14 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from app.api.v1.routes import identity_coverage
 from app.core.config import Settings
 from app.db.base import Base
 from app.db.models import DataSource, ImportBatch, Player, PlayerAlias, PlayerProfileSnapshot, ReconciliationCase
 from app.ingestion.player_profiles.service import (
     BWFPlayerProfileClient,
     Candidate,
+    NO_EXACT_CANDIDATE_CASE_TYPE,
     SourceAccessStopped,
     SourceResponse,
     decide_alias,
@@ -206,6 +208,47 @@ def test_unresolved_queue_checkpoints_and_releases_session_state(monkeypatch: py
             assert summary["selected"] == 3
             assert summary["unresolved"] == 3
             assert checkpoints == [(2, "chunk_complete"), (3, "batch_complete")]
+            assert session.scalar(select(ReconciliationCase).where(
+                ReconciliationCase.case_type == NO_EXACT_CANDIDATE_CASE_TYPE,
+                ReconciliationCase.status == "OPEN",
+            )) is not None
+
+            repeat_summary = run_full_queue(
+                session,
+                enabled_settings(bwf_player_profiles_batch_size=3, bwf_player_profiles_transaction_chunk_size=2),
+                NoMatchClient(),
+            )
+            assert repeat_summary["selected"] == 0
+            assert repeat_summary["unresolved"] == 0
+    finally:
+        Base.metadata.drop_all(engine)
+
+
+def test_coverage_separates_terminal_no_candidate_cases_from_eligible_queue() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            historical = DataSource(code="HISTORICAL_COVERAGE_TEST", source_kind="HISTORICAL_SEED", display_name="Historical coverage test", base_url=None)
+            session.add(historical)
+            session.flush()
+            no_candidate = PlayerAlias(source_id=historical.id, alias_text="No Candidate", normalized_alias="NO CANDIDATE")
+            still_eligible = PlayerAlias(source_id=historical.id, alias_text="Still Eligible", normalized_alias="STILL ELIGIBLE")
+            session.add_all((no_candidate, still_eligible))
+            session.flush()
+            session.add(ReconciliationCase(
+                case_type=NO_EXACT_CANDIDATE_CASE_TYPE,
+                status="OPEN",
+                candidate_entity_type="PLAYER_ALIAS",
+                candidate_entity_id=no_candidate.id,
+                rationale="Official search returned no exact candidate.",
+            ))
+            session.commit()
+
+            coverage = identity_coverage(session)["data"]
+            assert coverage["aliases_no_exact_candidate"] == 1
+            assert coverage["eligible_queue_remaining"] == 1
+            assert coverage["queue_complete"] is False
     finally:
         Base.metadata.drop_all(engine)
 

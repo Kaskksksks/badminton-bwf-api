@@ -45,6 +45,7 @@ PARSER_VERSION = "bwf-player-profile-interface-v1"
 RESOLVER_VERSION = "bwf-profile-auto-resolver-v2"
 SOURCE_CODE = "BWF_OFFICIAL_PLAYER_PROFILES"
 SOURCE_NAME = "BWF official player profiles"
+NO_EXACT_CANDIDATE_CASE_TYPE = "PLAYER_IDENTITY_NO_EXACT_CANDIDATE"
 
 
 class SourceAccessStopped(RuntimeError):
@@ -333,6 +334,31 @@ def record_source_error_case(session: Session, alias: PlayerAlias, raw: RawInges
         session.flush()
 
 
+def record_no_exact_candidate_case(session: Session, alias: PlayerAlias, raw: RawIngestionRecord) -> ReconciliationCase:
+    """Record a terminal automatic-review outcome when official search has no exact profile match."""
+    existing = session.scalar(select(ReconciliationCase).where(
+        ReconciliationCase.case_type == NO_EXACT_CANDIDATE_CASE_TYPE,
+        ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+        ReconciliationCase.candidate_entity_id == alias.id,
+        ReconciliationCase.status == "OPEN",
+    ))
+    if existing is None:
+        existing = ReconciliationCase(
+            case_type=NO_EXACT_CANDIDATE_CASE_TYPE,
+            status="OPEN",
+            candidate_entity_type="PLAYER_ALIAS",
+            candidate_entity_id=alias.id,
+            rationale=(
+                "The authorised official BWF player search returned no exact normalised-name candidate; "
+                f"official search evidence record {raw.id}. The alias remains unlinked and is excluded from "
+                "future automatic batches unless an explicit recheck workflow is added."
+            ),
+        )
+        session.add(existing)
+        session.flush()
+    return existing
+
+
 def upsert_canonical_profile(session: Session, source: DataSource, response: SourceResponse) -> tuple[Player, PlayerProfileSnapshot]:
     raw = persist_raw(session, source, response)
     profile = extract_profile(response.payload)
@@ -462,9 +488,20 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
             ReconciliationCase.candidate_entity_id == PlayerAlias.id,
             ReconciliationCase.status == "OPEN",
         ).exists()
+        open_no_exact_candidate_case_exists = select(ReconciliationCase.id).where(
+            ReconciliationCase.case_type == NO_EXACT_CANDIDATE_CASE_TYPE,
+            ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+            ReconciliationCase.candidate_entity_id == PlayerAlias.id,
+            ReconciliationCase.status == "OPEN",
+        ).exists()
         aliases = session.scalars(
             select(PlayerAlias)
-            .where(PlayerAlias.player_id.is_(None), ~current_resolver_link_exists, ~open_source_error_case_exists)
+            .where(
+                PlayerAlias.player_id.is_(None),
+                ~current_resolver_link_exists,
+                ~open_source_error_case_exists,
+                ~open_no_exact_candidate_case_exists,
+            )
             .order_by(PlayerAlias.created_at)
             .limit(settings.bwf_player_profiles_batch_size)
         ).all()
@@ -480,10 +517,11 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
                 summary["source_stopped"] = 1
                 source_stop = exc
                 break
-            persist_raw(session, source, search)
+            raw = persist_raw(session, source, search)
             candidates = extract_candidates(search.payload)
             exact = [candidate for candidate in candidates if normalize_name(candidate.display_name) == normalize_name(alias.alias_text)]
             if not exact:
+                record_no_exact_candidate_case(session, alias, raw)
                 summary["unresolved"] += 1
                 if summary["selected"] % settings.bwf_player_profiles_transaction_chunk_size == 0:
                     checkpoint_batch_memory(session, summary, reason="chunk_complete")
