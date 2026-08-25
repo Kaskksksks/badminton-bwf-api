@@ -28,10 +28,13 @@ def enabled_settings(**changes: object) -> Settings:
     return Settings(**values)
 
 
-def profile_snapshot(profile_id: str = "58240", name: str = "Yuta Watanabe", country: str = "JPN") -> PlayerProfileSnapshot:
+def profile_snapshot(
+    profile_id: str = "58240", name: str = "Yuta Watanabe", country: str = "JPN", nationality: str | None = None
+) -> PlayerProfileSnapshot:
     return PlayerProfileSnapshot(
         id="snapshot-1", source_id="source-1", bwf_profile_id=profile_id, source_url=f"https://bwfbadminton.com/player/{profile_id}",
-        content_hash="hash", profile_name=name, country_code=country, payload={}, parser_version="test",
+        content_hash="hash", profile_name=name, country_code=country,
+        payload={"nationality": nationality or country}, parser_version="test",
     )
 
 
@@ -57,6 +60,7 @@ def test_extracts_official_profile_summary() -> None:
     profile = extract_profile({"results": {"id": 58240, "name_display": "Yuta Watanabe", "date_of_birth": "1997-06-13", "nationality": "JPN", "country_model": {"code_iso3": "JPN", "name": "Japan"}, "profile_type": "PLAYER"}})
     assert profile["bwf_profile_id"] == "58240"
     assert profile["country_code"] == "JPN"
+    assert profile["bwf_nationality_code"] == "JPN"
     assert str(profile["date_of_birth"]) == "1997-06-13"
 
 
@@ -76,10 +80,34 @@ def test_observed_bold_search_candidate_can_pass_country_consistency() -> None:
     assert decision[0] == "CONFIRMED_AUTO"
 
 
+def test_bwf_malaysia_nationality_matches_search_while_iso_metadata_differs() -> None:
+    alias = PlayerAlias(id="alias-1", source_id="historical", alias_text="LIEW Daren", normalized_alias="LIEW DAREN")
+    player = Player(id="player-1", full_name="LIEW Daren", country_code="MYS")
+    decision = decide_alias(
+        alias, player, profile_snapshot(name="LIEW Daren", country="MYS", nationality="MAS"),
+        exact_candidate_count=1, search_country_code="MAS",
+    )
+    assert decision[0] == "CONFIRMED_AUTO"
+    assert decision[3]["official_profile_bwf_nationality_code"] == "MAS"
+    assert decision[3]["official_country_iso3_code"] == "MYS"
+
+
+def test_bwf_chinese_taipei_nationality_matches_search_while_iso_metadata_differs() -> None:
+    alias = PlayerAlias(id="alias-1", source_id="historical", alias_text="CHOU Tien Chen", normalized_alias="CHOU TIEN CHEN")
+    player = Player(id="player-1", full_name="CHOU Tien Chen", country_code="TWN")
+    decision = decide_alias(
+        alias, player, profile_snapshot(name="CHOU Tien Chen", country="TWN", nationality="TPE"),
+        exact_candidate_count=1, search_country_code="TPE",
+    )
+    assert decision[0] == "CONFIRMED_AUTO"
+    assert decision[3]["official_profile_bwf_nationality_code"] == "TPE"
+    assert decision[3]["official_country_iso3_code"] == "TWN"
+
+
 def test_country_mismatch_is_conflicted_and_not_confirmed() -> None:
     alias = PlayerAlias(id="alias-1", source_id="historical", alias_text="YUTA WATANABE", normalized_alias="YUTA WATANABE")
     player = Player(id="player-1", full_name="Yuta Watanabe", country_code="JPN")
-    decision = decide_alias(alias, player, profile_snapshot(), exact_candidate_count=1, search_country_code="KOR")
+    decision = decide_alias(alias, player, profile_snapshot(nationality="JPN"), exact_candidate_count=1, search_country_code="THA")
     assert decision[0] == "CONFLICTED"
     assert decision[1] == "COUNTRY_MISMATCH"
 

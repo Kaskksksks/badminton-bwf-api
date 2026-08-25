@@ -40,7 +40,7 @@ from app.db.models import (
 
 logger = logging.getLogger(__name__)
 PARSER_VERSION = "bwf-player-profile-interface-v1"
-RESOLVER_VERSION = "bwf-profile-auto-resolver-v1"
+RESOLVER_VERSION = "bwf-profile-auto-resolver-v2"
 SOURCE_CODE = "BWF_OFFICIAL_PLAYER_PROFILES"
 SOURCE_NAME = "BWF official player profiles"
 
@@ -227,6 +227,7 @@ def extract_profile(payload: Any) -> dict[str, Any]:
         "first_name": first_present(profile, "first_name", "firstName"),
         "last_name": first_present(profile, "last_name", "lastName"),
         "country_code": str(country_code).upper()[:8] if country_code else None,
+        "bwf_nationality_code": str(first_present(profile, "nationality")).upper()[:8] if first_present(profile, "nationality") else None,
         "country_name": first_present(country, "name", "country_name"),
         "date_of_birth": parse_date(first_present(profile, "date_of_birth", "dob")),
         "profile_type": str(first_present(profile, "profile_type", "profileType")) if first_present(profile, "profile_type", "profileType") is not None else None,
@@ -310,16 +311,21 @@ def decide_alias(
 ) -> tuple[str, str, int, dict[str, Any], str]:
     alias_name = normalize_name(alias.alias_text)
     official_name = normalize_name(player.full_name)
+    profile_bwf_nationality_code = first_present(as_mapping(snapshot.payload), "nationality")
+    profile_bwf_nationality_code = str(profile_bwf_nationality_code).upper()[:8] if profile_bwf_nationality_code else None
+    normalized_search_country_code = search_country_code.upper()[:8] if search_country_code else None
     evidence = {
         "alias_text": alias.alias_text, "normalized_alias": alias_name, "official_name": player.full_name,
-        "official_profile_id": snapshot.bwf_profile_id, "official_country_code": player.country_code,
+        "official_profile_id": snapshot.bwf_profile_id,
+        "official_profile_bwf_nationality_code": profile_bwf_nationality_code,
+        "official_country_iso3_code": player.country_code,
         "exact_candidate_count": exact_candidate_count, "profile_snapshot_id": snapshot.id,
-        "search_country_code": search_country_code,
+        "search_country_code": normalized_search_country_code,
     }
     if alias_name != official_name:
         return "UNRESOLVED", "NAME_MISMATCH", 0, evidence, "Official profile name does not exactly match the historical alias after normalisation."
-    if search_country_code and player.country_code and search_country_code.upper() != player.country_code.upper():
-        return "CONFLICTED", "COUNTRY_MISMATCH", 20, evidence, "Official search-country and official profile-country disagree; no identity link is allowed."
+    if normalized_search_country_code and profile_bwf_nationality_code and normalized_search_country_code != profile_bwf_nationality_code:
+        return "CONFLICTED", "COUNTRY_MISMATCH", 20, evidence, "Official BWF search-country and official BWF profile nationality disagree; no identity link is allowed."
     if exact_candidate_count != 1:
         return "CONFLICTED", "MULTIPLE_CANDIDATES", 40, evidence, "More than one official profile matches the historical alias exactly."
     # Historical aliases do not reliably carry country; a unique exact official profile is a strong automated link,
@@ -367,7 +373,16 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
     client = client or BWFPlayerProfileClient(settings)
     summary = {"selected": 0, "confirmed_auto": 0, "provisional": 0, "conflicted": 0, "unresolved": 0, "errors": 0}
     try:
-        aliases = session.scalars(select(PlayerAlias).where(PlayerAlias.player_id.is_(None), PlayerAlias.resolution_status != "CONFLICTED").order_by(PlayerAlias.created_at).limit(settings.bwf_player_profiles_batch_size)).all()
+        current_resolver_link_exists = select(PlayerIdentityLink.id).where(
+            PlayerIdentityLink.alias_id == PlayerAlias.id,
+            PlayerIdentityLink.resolver_version == RESOLVER_VERSION,
+        ).exists()
+        aliases = session.scalars(
+            select(PlayerAlias)
+            .where(PlayerAlias.player_id.is_(None), ~current_resolver_link_exists)
+            .order_by(PlayerAlias.created_at)
+            .limit(settings.bwf_player_profiles_batch_size)
+        ).all()
         for alias in aliases:
             summary["selected"] += 1
             search = client.search(alias.alias_text)
