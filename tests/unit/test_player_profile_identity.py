@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.db.models import Player, PlayerAlias, PlayerProfileSnapshot
+from app.db.base import Base
+from app.db.models import DataSource, ImportBatch, Player, PlayerAlias, PlayerProfileSnapshot, ReconciliationCase
 from app.ingestion.player_profiles.service import (
     BWFPlayerProfileClient,
     Candidate,
@@ -14,6 +17,7 @@ from app.ingestion.player_profiles.service import (
     extract_candidates,
     extract_profile,
     normalize_name,
+    run_full_queue,
 )
 
 
@@ -157,3 +161,37 @@ def test_no_historical_match_import_or_mutation_symbols() -> None:
 def test_youth_profile_type_is_preserved() -> None:
     profile = extract_profile({"results": {"id": 1, "name_display": "Junior Player", "country_model": {"code_iso3": "MAS"}, "profile_type": "JUNIOR"}})
     assert profile["profile_type"] == "JUNIOR"
+
+
+def test_upstream_server_error_stops_collection_without_retrying() -> None:
+    transport = httpx.MockTransport(lambda request: httpx.Response(500, request=request, json={"detail": "upstream error"}))
+    client = BWFPlayerProfileClient(enabled_settings(), httpx.Client(base_url="https://example.test", transport=transport))
+    with pytest.raises(SourceAccessStopped, match="HTTP 500") as captured:
+        client.search("YU Yang (F)")
+    assert captured.value.endpoint_key == "h2h-player-search"
+    assert captured.value.status_code == 500
+
+
+def test_server_error_is_persisted_as_skipped_exception_without_raising() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            historical = DataSource(code="HISTORICAL_TEST", source_kind="HISTORICAL_SEED", display_name="Historical test", base_url=None)
+            session.add(historical)
+            session.flush()
+            session.add(PlayerAlias(source_id=historical.id, alias_text="YU Yang (F)", normalized_alias="YU YANG F"))
+            session.commit()
+            transport = httpx.MockTransport(lambda request: httpx.Response(500, request=request, json={"detail": "upstream error"}))
+            client = BWFPlayerProfileClient(enabled_settings(), httpx.Client(base_url="https://example.test", transport=transport))
+            summary = run_full_queue(session, enabled_settings(), client)
+            session.commit()
+            assert summary["selected"] == 1
+            assert summary["errors"] == 1
+            assert summary["source_stopped"] == 1
+            assert session.scalar(select(ImportBatch.status)) == "FAILED"
+            case = session.scalar(select(ReconciliationCase).where(ReconciliationCase.case_type == "PLAYER_IDENTITY_SOURCE_ERROR"))
+            assert case is not None
+            assert case.candidate_entity_type == "PLAYER_ALIAS"
+    finally:
+        Base.metadata.drop_all(engine)

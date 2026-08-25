@@ -1,9 +1,9 @@
 """Authorised BWF player-profile evidence collection and conservative identity resolution.
 
 This module is deliberately opt-in. It never runs on a public read endpoint, never
-accepts arbitrary URLs, and stops on source access denial or rate limiting. It
-creates auditable canonical BWF profiles, then resolves historical aliases only
-according to documented deterministic rules.
+accepts arbitrary URLs, and stops safely on source access denial, rate limiting,
+or upstream server failure. It creates auditable canonical BWF profiles, then
+resolves historical aliases only according to documented deterministic rules.
 """
 from __future__ import annotations
 
@@ -46,7 +46,13 @@ SOURCE_NAME = "BWF official player profiles"
 
 
 class SourceAccessStopped(RuntimeError):
-    """Collection must stop, rather than retry around an upstream access control."""
+    """Collection must stop rather than retry around an upstream source failure."""
+
+    def __init__(self, message: str, *, endpoint_key: str, url: str, status_code: int) -> None:
+        super().__init__(message)
+        self.endpoint_key = endpoint_key
+        self.url = url
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -154,8 +160,11 @@ class BWFPlayerProfileClient:
         self._wait()
         response = self._client.get(path, params=dict(params))
         self._last_request_at = time.monotonic()
-        if response.status_code in {401, 403, 429, 503}:
-            raise SourceAccessStopped(f"BWF player source stopped collection: HTTP {response.status_code} at {endpoint_key}")
+        if response.status_code in {401, 403, 429, 500, 502, 503, 504}:
+            raise SourceAccessStopped(
+                f"BWF player source stopped collection: HTTP {response.status_code} at {endpoint_key}",
+                endpoint_key=endpoint_key, url=str(response.url), status_code=response.status_code,
+            )
         response.raise_for_status()
         try:
             payload = response.json()
@@ -252,6 +261,45 @@ def persist_raw(session: Session, source: DataSource, response: SourceResponse) 
     session.add(record)
     session.flush()
     return record
+
+
+def persist_source_stop(session: Session, source: DataSource, error: SourceAccessStopped) -> RawIngestionRecord:
+    """Persist the failed official request as auditable negative operational evidence."""
+    record = RawIngestionRecord(
+        source_id=source.id,
+        endpoint_key=error.endpoint_key,
+        request_fingerprint=canonical_hash({"endpoint": error.endpoint_key, "url": error.url}),
+        source_record_key=error.url,
+        retrieved_at=utcnow(),
+        http_status=error.status_code,
+        content_hash=canonical_hash({"endpoint": error.endpoint_key, "url": error.url, "status": error.status_code}),
+        raw_payload=None,
+        parser_version=PARSER_VERSION,
+        reliability="OFFICIAL_PROFILE_SOURCE",
+        processing_status="SOURCE_STOPPED",
+        error_message=str(error),
+    )
+    session.add(record)
+    session.flush()
+    return record
+
+
+def record_source_error_case(session: Session, alias: PlayerAlias, raw: RawIngestionRecord, error: SourceAccessStopped) -> None:
+    existing = session.scalar(select(ReconciliationCase).where(
+        ReconciliationCase.case_type == "PLAYER_IDENTITY_SOURCE_ERROR",
+        ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+        ReconciliationCase.candidate_entity_id == alias.id,
+        ReconciliationCase.status == "OPEN",
+    ))
+    if existing is None:
+        session.add(ReconciliationCase(
+            case_type="PLAYER_IDENTITY_SOURCE_ERROR",
+            status="OPEN",
+            candidate_entity_type="PLAYER_ALIAS",
+            candidate_entity_id=alias.id,
+            rationale=f"{error}; raw official request record {raw.id}",
+        ))
+        session.flush()
 
 
 def upsert_canonical_profile(session: Session, source: DataSource, response: SourceResponse) -> tuple[Player, PlayerProfileSnapshot]:
@@ -371,21 +419,36 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
     session.flush()
     created_client = client is None
     client = client or BWFPlayerProfileClient(settings)
-    summary = {"selected": 0, "confirmed_auto": 0, "provisional": 0, "conflicted": 0, "unresolved": 0, "errors": 0}
+    summary = {"selected": 0, "confirmed_auto": 0, "provisional": 0, "conflicted": 0, "unresolved": 0, "errors": 0, "source_stopped": 0}
     try:
         current_resolver_link_exists = select(PlayerIdentityLink.id).where(
             PlayerIdentityLink.alias_id == PlayerAlias.id,
             PlayerIdentityLink.resolver_version == RESOLVER_VERSION,
         ).exists()
+        open_source_error_case_exists = select(ReconciliationCase.id).where(
+            ReconciliationCase.case_type == "PLAYER_IDENTITY_SOURCE_ERROR",
+            ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+            ReconciliationCase.candidate_entity_id == PlayerAlias.id,
+            ReconciliationCase.status == "OPEN",
+        ).exists()
         aliases = session.scalars(
             select(PlayerAlias)
-            .where(PlayerAlias.player_id.is_(None), ~current_resolver_link_exists)
+            .where(PlayerAlias.player_id.is_(None), ~current_resolver_link_exists, ~open_source_error_case_exists)
             .order_by(PlayerAlias.created_at)
             .limit(settings.bwf_player_profiles_batch_size)
         ).all()
+        source_stop: SourceAccessStopped | None = None
         for alias in aliases:
             summary["selected"] += 1
-            search = client.search(alias.alias_text)
+            try:
+                search = client.search(alias.alias_text)
+            except SourceAccessStopped as exc:
+                raw = persist_source_stop(session, source, exc)
+                record_source_error_case(session, alias, raw, exc)
+                summary["errors"] += 1
+                summary["source_stopped"] = 1
+                source_stop = exc
+                break
             persist_raw(session, source, search)
             candidates = extract_candidates(search.payload)
             exact = [candidate for candidate in candidates if normalize_name(candidate.display_name) == normalize_name(alias.alias_text)]
@@ -395,9 +458,19 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
             # Inspect only exact candidates; the source request interval applies to every profile.
             resolved: list[tuple[Candidate, Player, PlayerProfileSnapshot]] = []
             for candidate in exact:
-                profile_response = client.summary(candidate.bwf_profile_id)
+                try:
+                    profile_response = client.summary(candidate.bwf_profile_id)
+                except SourceAccessStopped as exc:
+                    raw = persist_source_stop(session, source, exc)
+                    record_source_error_case(session, alias, raw, exc)
+                    summary["errors"] += 1
+                    summary["source_stopped"] = 1
+                    source_stop = exc
+                    break
                 player, snapshot = upsert_canonical_profile(session, source, profile_response)
                 resolved.append((candidate, player, snapshot))
+            if source_stop is not None:
+                break
             for candidate, player, snapshot in resolved:
                 decision = decide_alias(alias, player, snapshot, len(resolved), candidate.country_code)
                 status, *_ = decision
@@ -408,7 +481,8 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
                     summary["conflicted"] += 1
                 else:
                     summary["provisional"] += 1
-        batch.status = BatchStatus.SUCCEEDED.value
+        batch.status = BatchStatus.FAILED.value if source_stop is not None else BatchStatus.SUCCEEDED.value
+        batch.error_summary = str(source_stop) if source_stop is not None else None
         batch.completed_at = utcnow()
         batch.input_row_count = summary["selected"]
         batch.accepted_count = summary["confirmed_auto"] + summary["provisional"]
