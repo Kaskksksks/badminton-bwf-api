@@ -44,6 +44,15 @@ def test_extracts_observed_search_candidates() -> None:
     assert candidates == [Candidate("58240", "YUTA WATANABE", "JPN")]
 
 
+def test_extracts_observed_bold_search_name_and_flag_country_code() -> None:
+    candidates = extract_candidates([{
+        "id": 54360,
+        "name_display_bold": '<span class="name-2">JOO</span> <span class="name-1">Eun Ae</span>',
+        "nationality_item": {"name": "Korea", "flag_url_thumbnail": "https://img.bwfbadminton.com/image/upload/v2/assets/flag-circle-svg-custom/KOR.png"},
+    }])
+    assert candidates == [Candidate("54360", "JOO Eun Ae", "KOR")]
+
+
 def test_extracts_official_profile_summary() -> None:
     profile = extract_profile({"results": {"id": 58240, "name_display": "Yuta Watanabe", "date_of_birth": "1997-06-13", "nationality": "JPN", "country_model": {"code_iso3": "JPN", "name": "Japan"}, "profile_type": "PLAYER"}})
     assert profile["bwf_profile_id"] == "58240"
@@ -58,6 +67,13 @@ def test_unique_exact_profile_is_automatic_confirmation() -> None:
     assert decision[0] == "CONFIRMED_AUTO"
     assert decision[1] == "UNIQUE_EXACT_NAME"
     assert decision[2] == 80
+
+
+def test_observed_bold_search_candidate_can_pass_country_consistency() -> None:
+    alias = PlayerAlias(id="alias-1", source_id="historical", alias_text="JOO Eun Ae", normalized_alias="JOO EUN AE")
+    player = Player(id="player-1", full_name="JOO Eun Ae", country_code="KOR")
+    decision = decide_alias(alias, player, profile_snapshot(name="JOO Eun Ae", country="KOR"), exact_candidate_count=1, search_country_code="KOR")
+    assert decision[0] == "CONFIRMED_AUTO"
 
 
 def test_country_mismatch_is_conflicted_and_not_confirmed() -> None:

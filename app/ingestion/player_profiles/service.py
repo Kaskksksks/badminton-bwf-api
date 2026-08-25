@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import html
 import logging
+import re
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -102,6 +104,27 @@ def first_present(value: Mapping[str, Any], *keys: str) -> Any:
     return None
 
 
+def strip_html_text(value: Any) -> str | None:
+    """Convert BWF's observed highlighted name markup to deterministic plain text."""
+    if not isinstance(value, str):
+        return None
+    plain = re.sub(r"<[^>]+>", " ", html.unescape(value))
+    plain = " ".join(plain.split())
+    return plain or None
+
+
+def candidate_country_code(country: Mapping[str, Any]) -> str | None:
+    direct = first_present(country, "code_iso3", "code", "country_code")
+    if direct:
+        return str(direct).upper()[:8]
+    # The observed h2h search response supplies country name plus a flag URL,
+    # such as .../KOR.png. Use only that explicit source component, never infer
+    # a code from the country display name.
+    flag_url = first_present(country, "flag_url_thumbnail", "flag_url", "flag")
+    match = re.search(r"/([A-Za-z]{3})\.png(?:[?#]|$)", str(flag_url)) if flag_url else None
+    return match.group(1).upper() if match else None
+
+
 class BWFPlayerProfileClient:
     """Constrained client for the two official player routes observed in the BWF UI."""
 
@@ -184,7 +207,9 @@ def extract_candidates(payload: Any) -> list[Candidate]:
             continue
         country = as_mapping(first_present(item, "nationality_item", "country_model", "country"))
         display = first_present(item, "name_display", "name", "full_name", "display_name")
-        candidates.append(Candidate(str(profile_id), str(display) if display else None, str(first_present(country, "code_iso3", "code", "name")) if country else None))
+        if display is None:
+            display = strip_html_text(first_present(item, "name_display_bold", "name_bold"))
+        candidates.append(Candidate(str(profile_id), str(display) if display else None, candidate_country_code(country)))
     return candidates
 
 
