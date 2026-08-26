@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import httpx
 import pytest
 from sqlalchemy import create_engine, select
@@ -26,10 +28,12 @@ from app.ingestion.player_profiles.service import (
     BWFPlayerProfileClient,
     Candidate,
     NO_EXACT_CANDIDATE_CASE_TYPE,
+    NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
     NO_SENIOR_CONTEXT_CASE_TYPE,
     SourceAccessStopped,
     SourceResponse,
     context_summary_for_alias,
+    context_summary_for_player,
     decide_alias,
     ensure_collection_allowed,
     extract_candidates,
@@ -321,6 +325,8 @@ def add_source_context(
     context_key: str,
     tournament_name: str,
     event_type: str,
+    match_date: date | None = None,
+    match_status: str = "COMPLETED",
 ) -> None:
     """Create one stored context using the historical importer relationship shape."""
     participant = Participant(
@@ -349,7 +355,8 @@ def add_source_context(
         tournament_id=tournament.id,
         event_id=event.id,
         participant_1_id=participant.id,
-        status="COMPLETED",
+        match_date=match_date or date.today(),
+        status=match_status,
         completion_basis="TEST_CONTEXT",
         source_completeness="COMPLETE",
         historical_seed_flag=True,
@@ -396,12 +403,12 @@ def test_identity_queue_requires_a_recoverable_senior_non_para_source_context() 
             session.commit()
 
             assert context_summary_for_alias(session, senior).eligible_for_profile_search is True
-            assert context_summary_for_alias(session, mixed).evidence() == {
-                "senior_contexts": 1,
-                "junior_contexts": 1,
-                "para_contexts": 0,
-                "unclassified_contexts": 0,
-            }
+            mixed_context = context_summary_for_alias(session, mixed)
+            assert mixed_context.senior_contexts == 1
+            assert mixed_context.recent_senior_participations == 1
+            assert mixed_context.junior_contexts == 1
+            assert mixed_context.para_contexts == 0
+            assert mixed_context.unclassified_contexts == 0
             assert context_summary_for_alias(session, junior).eligible_for_profile_search is False
             assert context_summary_for_alias(session, para).eligible_for_profile_search is False
             assert context_summary_for_alias(session, contextless).eligible_for_profile_search is False
@@ -425,5 +432,93 @@ def test_identity_queue_requires_a_recoverable_senior_non_para_source_context() 
             assert coverage["aliases_no_exact_candidate"] == 2
             assert coverage["eligible_queue_remaining"] == 0
             assert coverage["queue_complete"] is True
+    finally:
+        Base.metadata.drop_all(engine)
+
+
+def test_identity_queue_requires_recent_completed_or_retired_senior_participation() -> None:
+    class RecordingNoMatchClient:
+        def __init__(self) -> None:
+            self.search_calls: list[str] = []
+
+        def search(self, alias_text: str) -> SourceResponse:
+            self.search_calls.append(alias_text)
+            return SourceResponse("h2h-player-search", f"https://example.test/search?query={alias_text}", 200, [])
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            historical = DataSource(
+                code="HISTORICAL_ACTIVITY_TEST",
+                source_kind="HISTORICAL_SEED",
+                display_name="Historical activity test",
+                base_url=None,
+            )
+            session.add(historical)
+            session.flush()
+            recent = PlayerAlias(source_id=historical.id, alias_text="Recent Completed", normalized_alias="RECENT COMPLETED")
+            retired = PlayerAlias(source_id=historical.id, alias_text="Recent Retired", normalized_alias="RECENT RETIRED")
+            stale = PlayerAlias(source_id=historical.id, alias_text="Stale Senior", normalized_alias="STALE SENIOR")
+            scheduled = PlayerAlias(source_id=historical.id, alias_text="Scheduled Senior", normalized_alias="SCHEDULED SENIOR")
+            session.add_all((recent, retired, stale, scheduled))
+            session.flush()
+            add_source_context(session, recent, context_key="recent-completed", tournament_name="Senior Continental Championships", event_type="MS", match_date=date.today())
+            add_source_context(session, retired, context_key="recent-retired", tournament_name="Senior Continental Championships", event_type="WS", match_date=date.today() - timedelta(days=7), match_status="RETIRED")
+            add_source_context(session, stale, context_key="stale", tournament_name="Senior Continental Championships", event_type="MS", match_date=date.today() - timedelta(weeks=52, days=1))
+            add_source_context(session, scheduled, context_key="scheduled", tournament_name="Senior Continental Championships", event_type="MS", match_date=date.today(), match_status="SCHEDULED")
+            session.commit()
+
+            assert context_summary_for_alias(session, recent).activity_status == "ACTIVE_RECENT_OFFICIAL_PARTICIPATION"
+            assert context_summary_for_alias(session, retired).eligible_for_profile_search is True
+            assert context_summary_for_alias(session, stale).activity_status == "NOT_RECENTLY_ACTIVE"
+            assert context_summary_for_alias(session, scheduled).activity_status == "NOT_RECENTLY_ACTIVE"
+
+            client = RecordingNoMatchClient()
+            summary = run_full_queue(
+                session,
+                enabled_settings(bwf_player_profiles_batch_size=4, bwf_player_profiles_transaction_chunk_size=1),
+                client,
+            )
+            assert client.search_calls == ["Recent Completed", "Recent Retired"]
+            assert summary["selected"] == 4
+            assert summary["unresolved"] == 2
+            assert summary["no_recent_senior_activity"] == 2
+            assert len(session.scalars(select(ReconciliationCase).where(
+                ReconciliationCase.case_type == NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
+                ReconciliationCase.status == "OPEN",
+            )).all()) == 2
+            coverage = identity_coverage(session)["data"]
+            assert coverage["aliases_no_recent_senior_activity"] == 2
+            assert coverage["eligible_queue_remaining"] == 0
+    finally:
+        Base.metadata.drop_all(engine)
+
+
+def test_confirmed_player_activity_summary_requires_recent_senior_participation() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            historical = DataSource(
+                code="HISTORICAL_PLAYER_ACTIVITY_TEST",
+                source_kind="HISTORICAL_SEED",
+                display_name="Historical player activity test",
+                base_url=None,
+            )
+            active_player = Player(full_name="Active Player", identity_status="CONFIRMED")
+            inactive_player = Player(full_name="Inactive Player", identity_status="CONFIRMED")
+            session.add_all((historical, active_player, inactive_player))
+            session.flush()
+            active_alias = PlayerAlias(source_id=historical.id, player_id=active_player.id, alias_text="Active Player", normalized_alias="ACTIVE PLAYER", resolution_status="CONFIRMED")
+            inactive_alias = PlayerAlias(source_id=historical.id, player_id=inactive_player.id, alias_text="Inactive Player", normalized_alias="INACTIVE PLAYER", resolution_status="CONFIRMED")
+            session.add_all((active_alias, inactive_alias))
+            session.flush()
+            add_source_context(session, active_alias, context_key="active-player", tournament_name="Senior Continental Championships", event_type="MS", match_date=date.today())
+            add_source_context(session, inactive_alias, context_key="inactive-player", tournament_name="Senior Continental Championships", event_type="MS", match_date=date.today() - timedelta(weeks=53))
+            session.commit()
+
+            assert context_summary_for_player(session, active_player).eligible_for_profile_search is True
+            assert context_summary_for_player(session, inactive_player).activity_status == "NOT_RECENTLY_ACTIVE"
     finally:
         Base.metadata.drop_all(engine)

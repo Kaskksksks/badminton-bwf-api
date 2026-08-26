@@ -15,7 +15,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
 
 import httpx
@@ -56,6 +56,7 @@ SOURCE_CODE = "BWF_OFFICIAL_PLAYER_PROFILES"
 SOURCE_NAME = "BWF official player profiles"
 NO_EXACT_CANDIDATE_CASE_TYPE = "PLAYER_IDENTITY_NO_EXACT_CANDIDATE"
 NO_SENIOR_CONTEXT_CASE_TYPE = "PLAYER_IDENTITY_NO_SENIOR_CONTEXT"
+NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE = "PLAYER_IDENTITY_NO_RECENT_SENIOR_ACTIVITY"
 
 
 @dataclass(frozen=True)
@@ -63,20 +64,38 @@ class AliasContextSummary:
     """Aggregate stored source contexts without assigning a category to a person."""
 
     senior_contexts: int = 0
+    recent_senior_participations: int = 0
+    latest_senior_match_date: date | None = None
     junior_contexts: int = 0
     para_contexts: int = 0
     unclassified_contexts: int = 0
 
     @property
-    def eligible_for_profile_search(self) -> bool:
+    def has_senior_context(self) -> bool:
         return self.senior_contexts > 0
 
-    def evidence(self) -> dict[str, int]:
+    @property
+    def eligible_for_profile_search(self) -> bool:
+        """Permit lookup only after recent senior, non-Para official participation."""
+        return self.has_senior_context and self.recent_senior_participations > 0
+
+    @property
+    def activity_status(self) -> str:
+        if self.eligible_for_profile_search:
+            return "ACTIVE_RECENT_OFFICIAL_PARTICIPATION"
+        if self.has_senior_context:
+            return "NOT_RECENTLY_ACTIVE"
+        return "ACTIVITY_UNKNOWN"
+
+    def evidence(self) -> dict[str, Any]:
         return {
             "senior_contexts": self.senior_contexts,
+            "recent_senior_participations": self.recent_senior_participations,
+            "latest_senior_match_date": self.latest_senior_match_date.isoformat() if self.latest_senior_match_date else None,
             "junior_contexts": self.junior_contexts,
             "para_contexts": self.para_contexts,
             "unclassified_contexts": self.unclassified_contexts,
+            "activity_status": self.activity_status,
         }
 
 
@@ -381,23 +400,23 @@ def record_no_exact_candidate_case(session: Session, alias: PlayerAlias, raw: Ra
     return existing
 
 
-def context_summary_for_alias(session: Session, alias: PlayerAlias) -> AliasContextSummary:
-    """Classify only the alias's stored match contexts at tournament/event boundaries.
-
-    This function never classifies a person. An alias is eligible only if at least one
-    existing context is explicitly neither junior nor Para; missing context is not proof.
-    """
+def _context_summary_for_alias_ids(session: Session, alias_ids: list[str], *, as_of: date | None = None) -> AliasContextSummary:
+    """Evaluate stored competition contexts, never a personal junior/Para classification."""
+    if not alias_ids:
+        return AliasContextSummary()
+    cutoff = (as_of or utcnow().date()) - timedelta(weeks=52)
     rows = session.execute(
-        select(Tournament, Event)
+        select(Tournament, Event, Match.match_date, Match.status)
         .select_from(ParticipantMember)
         .join(MatchParticipantContext, MatchParticipantContext.participant_id == ParticipantMember.participant_id)
         .join(Match, Match.id == MatchParticipantContext.match_id)
         .outerjoin(Tournament, Tournament.id == Match.tournament_id)
         .outerjoin(Event, Event.id == Match.event_id)
-        .where(ParticipantMember.source_alias_id == alias.id)
+        .where(ParticipantMember.source_alias_id.in_(alias_ids))
     ).all()
-    counts = {"senior": 0, "junior": 0, "para": 0, "unclassified": 0}
-    for tournament, event in rows:
+    counts = {"senior": 0, "recent_senior": 0, "junior": 0, "para": 0, "unclassified": 0}
+    latest_senior_match_date: date | None = None
+    for tournament, event, match_date, match_status in rows:
         if tournament is None or event is None:
             counts["unclassified"] += 1
             continue
@@ -416,12 +435,27 @@ def context_summary_for_alias(session: Session, alias: PlayerAlias) -> AliasCont
             counts["junior"] += 1
         else:
             counts["senior"] += 1
+            if match_date and (latest_senior_match_date is None or match_date > latest_senior_match_date):
+                latest_senior_match_date = match_date
+            if match_date and match_date >= cutoff and match_status in {"COMPLETED", "RETIRED"}:
+                counts["recent_senior"] += 1
     return AliasContextSummary(
         senior_contexts=counts["senior"],
+        recent_senior_participations=counts["recent_senior"],
+        latest_senior_match_date=latest_senior_match_date,
         junior_contexts=counts["junior"],
         para_contexts=counts["para"],
         unclassified_contexts=counts["unclassified"],
     )
+
+
+def context_summary_for_alias(session: Session, alias: PlayerAlias, *, as_of: date | None = None) -> AliasContextSummary:
+    return _context_summary_for_alias_ids(session, [alias.id], as_of=as_of)
+
+
+def context_summary_for_player(session: Session, player: Player, *, as_of: date | None = None) -> AliasContextSummary:
+    alias_ids = list(session.scalars(select(PlayerAlias.id).where(PlayerAlias.player_id == player.id)).all())
+    return _context_summary_for_alias_ids(session, alias_ids, as_of=as_of)
 
 
 def record_no_senior_context_case(session: Session, alias: PlayerAlias, context: AliasContextSummary) -> ReconciliationCase:
@@ -445,6 +479,36 @@ def record_no_senior_context_case(session: Session, alias: PlayerAlias, context:
                 f"para_contexts={aggregate['para_contexts']}; unclassified_contexts={aggregate['unclassified_contexts']}. "
                 "The alias remains unlinked and is excluded from future automatic batches unless an explicit "
                 "senior-context recheck workflow is added."
+            ),
+        )
+        session.add(existing)
+        session.flush()
+    return existing
+
+
+def record_no_recent_senior_activity_case(session: Session, alias: PlayerAlias, context: AliasContextSummary) -> ReconciliationCase:
+    """Record terminal 52-week activity ineligibility without contacting BWF."""
+    existing = session.scalar(select(ReconciliationCase).where(
+        ReconciliationCase.case_type == NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
+        ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+        ReconciliationCase.candidate_entity_id == alias.id,
+        ReconciliationCase.status == "OPEN",
+    ))
+    if existing is None:
+        aggregate = context.evidence()
+        existing = ReconciliationCase(
+            case_type=NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
+            status="OPEN",
+            candidate_entity_type="PLAYER_ALIAS",
+            candidate_entity_id=alias.id,
+            rationale=(
+                "No dated COMPLETED or RETIRED senior, non-Para official match exists within the rolling 52-week "
+                "eligibility window; no official BWF profile request was made. "
+                f"senior_contexts={aggregate['senior_contexts']}; "
+                f"recent_senior_participations={aggregate['recent_senior_participations']}; "
+                f"latest_senior_match_date={aggregate['latest_senior_match_date']}. "
+                "The alias remains unlinked and is excluded from future automatic batches unless a new qualifying "
+                "senior match context is stored."
             ),
         )
         session.add(existing)
@@ -576,6 +640,7 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
         "conflicted": 0,
         "unresolved": 0,
         "no_senior_context": 0,
+        "no_recent_senior_activity": 0,
         "errors": 0,
         "source_stopped": 0,
     }
@@ -602,6 +667,12 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
             ReconciliationCase.candidate_entity_id == PlayerAlias.id,
             ReconciliationCase.status == "OPEN",
         ).exists()
+        open_no_recent_senior_activity_case_exists = select(ReconciliationCase.id).where(
+            ReconciliationCase.case_type == NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
+            ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+            ReconciliationCase.candidate_entity_id == PlayerAlias.id,
+            ReconciliationCase.status == "OPEN",
+        ).exists()
         aliases = session.scalars(
             select(PlayerAlias)
             .where(
@@ -610,6 +681,7 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
                 ~open_source_error_case_exists,
                 ~open_no_exact_candidate_case_exists,
                 ~open_no_senior_context_case_exists,
+                ~open_no_recent_senior_activity_case_exists,
             )
             .order_by(PlayerAlias.created_at)
             .limit(settings.bwf_player_profiles_batch_size)
@@ -618,9 +690,15 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
         for alias in aliases:
             summary["selected"] += 1
             context = context_summary_for_alias(session, alias)
-            if not context.eligible_for_profile_search:
+            if not context.has_senior_context:
                 record_no_senior_context_case(session, alias, context)
                 summary["no_senior_context"] += 1
+                if summary["selected"] % settings.bwf_player_profiles_transaction_chunk_size == 0:
+                    checkpoint_batch_memory(session, summary, reason="chunk_complete")
+                continue
+            if not context.eligible_for_profile_search:
+                record_no_recent_senior_activity_case(session, alias, context)
+                summary["no_recent_senior_activity"] += 1
                 if summary["selected"] % settings.bwf_player_profiles_transaction_chunk_size == 0:
                     checkpoint_batch_memory(session, summary, reason="chunk_complete")
                 continue
@@ -675,7 +753,12 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
         batch.completed_at = utcnow()
         batch.input_row_count = summary["selected"]
         batch.accepted_count = summary["confirmed_auto"] + summary["provisional"]
-        batch.rejected_count = summary["conflicted"] + summary["unresolved"] + summary["no_senior_context"]
+        batch.rejected_count = (
+            summary["conflicted"]
+            + summary["unresolved"]
+            + summary["no_senior_context"]
+            + summary["no_recent_senior_activity"]
+        )
         session.flush()
         checkpoint_batch_memory(session, summary, reason="batch_complete")
         return summary

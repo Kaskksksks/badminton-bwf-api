@@ -31,8 +31,10 @@ from app.core.config import get_settings
 from app.core.worker_safety import collection_slot
 from app.ingestion.player_profiles.service import (
     NO_EXACT_CANDIDATE_CASE_TYPE,
+    NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
     NO_SENIOR_CONTEXT_CASE_TYPE,
     RESOLVER_VERSION,
+    context_summary_for_player,
     run_full_queue,
 )
 from app.statistics.service import interval_coverage_summary, interval_metrics_for_participant
@@ -121,7 +123,8 @@ def get_player(player_id: str, session: DbSession) -> dict[str, Any]:
     value = session.get(Player, player_id)
     if not value:
         raise HTTPException(status_code=404, detail="Player not found")
-    return {"data": {"id": value.id, "full_name": value.full_name, "country_code": value.country_code, "profile_url": value.profile_url, "identity_status": value.identity_status}, "meta": meta("BWF_LIVE_AND_RESOLVED_IDENTITIES")}
+    activity = context_summary_for_player(session, value)
+    return {"data": {"id": value.id, "full_name": value.full_name, "country_code": value.country_code, "profile_url": value.profile_url, "identity_status": value.identity_status, "activity_status": activity.activity_status, "trusted_statistics_eligible": activity.eligible_for_profile_search, "activity_evidence": activity.evidence()}, "meta": meta("BWF_LIVE_AND_RESOLVED_IDENTITIES")}
 
 
 @router.get("/players/{player_id}/matches")
@@ -132,7 +135,13 @@ def get_player_matches(player_id: str, session: DbSession) -> dict[str, Any]:
 
 @router.get("/players/{player_id}/statistics")
 def get_player_statistics(player_id: str, session: DbSession) -> dict[str, Any]:
-    return {"data": {"player_id": player_id, "statistics": [], "coverage": interval_coverage_summary(session)}, "meta": {**meta(), "notice": "Player statistics await resolved participant identity linkage."}}
+    player = session.get(Player, player_id)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+    activity = context_summary_for_player(session, player)
+    if not activity.eligible_for_profile_search:
+        return {"data": {"player_id": player_id, "statistics": [], "coverage": interval_coverage_summary(session), "activity_status": activity.activity_status, "trusted_statistics_eligible": False, "activity_evidence": activity.evidence()}, "meta": {**meta(), "notice": "Trusted player statistics are withheld until confirmed identity has a dated COMPLETED or RETIRED senior, non-Para official match within the prior 52 weeks."}}
+    return {"data": {"player_id": player_id, "statistics": [], "coverage": interval_coverage_summary(session), "activity_status": activity.activity_status, "trusted_statistics_eligible": True, "activity_evidence": activity.evidence()}, "meta": {**meta(), "notice": "Player statistics await resolved participant identity linkage and currently active official participation evidence."}}
 
 
 @router.get("/rankings")
@@ -223,6 +232,11 @@ def identity_coverage(session: DbSession) -> dict[str, Any]:
         ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
         ReconciliationCase.status == "OPEN",
     )).all())
+    no_recent_senior_activity_alias_ids = set(session.scalars(select(ReconciliationCase.candidate_entity_id).where(
+        ReconciliationCase.case_type == NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
+        ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+        ReconciliationCase.status == "OPEN",
+    )).all())
     resolver_link_alias_ids = set(session.scalars(select(PlayerIdentityLink.alias_id).where(
         PlayerIdentityLink.resolver_version == RESOLVER_VERSION,
     )).all())
@@ -232,6 +246,7 @@ def identity_coverage(session: DbSession) -> dict[str, Any]:
         and item.id not in terminal_no_exact_alias_ids
         and item.id not in source_error_alias_ids
         and item.id not in no_senior_context_alias_ids
+        and item.id not in no_recent_senior_activity_alias_ids
         for item in aliases
     )
     return {
@@ -246,11 +261,13 @@ def identity_coverage(session: DbSession) -> dict[str, Any]:
             "aliases_no_exact_candidate": len(terminal_no_exact_alias_ids),
             "aliases_source_error_quarantined": len(source_error_alias_ids),
             "aliases_no_senior_context": len(no_senior_context_alias_ids),
+            "aliases_no_recent_senior_activity": len(no_recent_senior_activity_alias_ids),
             "eligible_queue_remaining": eligible_queue_remaining,
             "queue_complete": eligible_queue_remaining == 0,
             "model_safe_identity_status": "CONFIRMED_ONLY",
+            "model_safe_activity_status": "RECENT_SENIOR_PARTICIPATION_REQUIRED",
         },
-        "meta": {**meta("BWF_OFFICIAL_PLAYER_PROFILES"), "notice": "Only confirmed aliases are eligible for verified player statistics and models. Queue completion means every alias is confirmed, conflicted, no-exact-candidate, source-error quarantined, or excluded from automatic processing because it lacks a recoverable senior source context."},
+        "meta": {**meta("BWF_OFFICIAL_PLAYER_PROFILES"), "notice": "Trusted player statistics and models require confirmed identity plus recent senior official participation. Queue completion means every alias is confirmed, conflicted, no-exact-candidate, source-error quarantined, or excluded from automatic processing because it lacks a recoverable senior source context or recent senior official participation."},
     }
 
 
