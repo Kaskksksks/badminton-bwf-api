@@ -18,6 +18,18 @@ _PARA_EVENT_TEXT_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
+# These markers describe only explicit junior competitions or age-category events.
+# They never inspect people or player profile fields, and intentionally do not treat
+# the broad word 'youth' as a junior exclusion without a BWF junior/U-age marker.
+_JUNIOR_TOURNAMENT_PATTERN = re.compile(
+    r"\b(?:world[\s-]*junior|junior(?:[\s-]*international)?|u[\s-]?(?:13|15|17|19))\b",
+    flags=re.IGNORECASE,
+)
+_JUNIOR_EVENT_PATTERN = re.compile(
+    r"\b(?:junior|u[\s-]?(?:13|15|17|19))\b",
+    flags=re.IGNORECASE,
+)
+
 _TOURNAMENT_TEXT_KEYS = (
     "name",
     "title",
@@ -61,4 +73,20 @@ def is_paralympic_match(envelope: dict[str, Any]) -> bool:
         for value in _strings(section, _EVENT_TEXT_KEYS):
             if _PARA_EVENT_CODE_PATTERN.search(value) or _PARA_EVENT_TEXT_PATTERN.search(value):
                 return True
+    return False
+
+
+def is_junior_tournament(payload: dict[str, Any]) -> bool:
+    """Return True only when tournament metadata explicitly identifies junior/U-age badminton."""
+    return any(_JUNIOR_TOURNAMENT_PATTERN.search(value) for value in _strings(payload, _TOURNAMENT_TEXT_KEYS))
+
+
+def is_junior_match(envelope: dict[str, Any]) -> bool:
+    """Return True when a live match carries an explicit junior/U-age event classification."""
+    for section_name in ("live_detail", "match_detail"):
+        section = envelope.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        if any(_JUNIOR_EVENT_PATTERN.search(value) for value in _strings(section, _EVENT_TEXT_KEYS)):
+            return True
     return False

@@ -26,7 +26,12 @@ from app.db.models import (
     Tournament,
 )
 from app.ingestion.adapters.bwf.client import BWFClient, BWFResponse
-from app.ingestion.adapters.bwf.eligibility import is_paralympic_match, is_paralympic_tournament
+from app.ingestion.adapters.bwf.eligibility import (
+    is_junior_match,
+    is_junior_tournament,
+    is_paralympic_match,
+    is_paralympic_tournament,
+)
 from app.snapshots.service import record_game_state
 
 PARSER_VERSION = "bwf-match-centre-v1"
@@ -303,12 +308,17 @@ def synchronize_current_bwf(session: Session, client: BWFClient | None = None, s
     eligible_tournament_count = 0
     skipped_paralympic_tournament_count = 0
     skipped_paralympic_match_count = 0
+    skipped_junior_tournament_count = 0
+    skipped_junior_match_count = 0
     tournaments = tournaments_response.payload.get("results") or []
     for tournament_payload in tournaments:
         if not isinstance(tournament_payload, dict) or tournament_payload.get("id") is None:
             continue
         if is_paralympic_tournament(tournament_payload):
             skipped_paralympic_tournament_count += 1
+            continue
+        if is_junior_tournament(tournament_payload):
+            skipped_junior_tournament_count += 1
             continue
         eligible_tournament_count += 1
         tournament = upsert_tournament(session, source, tournament_payload, tournament_raw)
@@ -320,6 +330,9 @@ def synchronize_current_bwf(session: Session, client: BWFClient | None = None, s
             if is_paralympic_match(envelope):
                 skipped_paralympic_match_count += 1
                 continue
+            if is_junior_match(envelope):
+                skipped_junior_match_count += 1
+                continue
             upsert_live_match(session, source, tournament, envelope, live_raw)
             live_match_count += 1
     if owned_client:
@@ -330,4 +343,6 @@ def synchronize_current_bwf(session: Session, client: BWFClient | None = None, s
         "live_matches": live_match_count,
         "skipped_paralympic_tournaments": skipped_paralympic_tournament_count,
         "skipped_paralympic_matches": skipped_paralympic_match_count,
+        "skipped_junior_tournaments": skipped_junior_tournament_count,
+        "skipped_junior_matches": skipped_junior_match_count,
     }

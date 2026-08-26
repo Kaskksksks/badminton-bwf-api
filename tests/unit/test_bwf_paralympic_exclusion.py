@@ -62,7 +62,11 @@ class FakeBWFClient:
         if tournament_id == 20:
             results = [_match(2001, "WD-U19", "Junior")]
         elif tournament_id == 30:
-            results = [_match(3001, "WH1", "Para"), _match(3002, "MS", "Senior")]
+            results = [
+                _match(3001, "WH1", "Para"),
+                _match(3002, "MS", "Senior"),
+                _match(3003, "WD-U19", "Junior Event"),
+            ]
         else:  # A failure here proves the Para tournament should have been skipped before the request.
             raise AssertionError("Para tournament must not be fetched")
         return _response("vue-live-matches", {"results": results})
@@ -78,7 +82,7 @@ def test_paralympic_markers_are_limited_to_competition_metadata() -> None:
     assert is_paralympic_match({"live_detail": {"event": "MS"}}) is False
 
 
-def test_live_ingestion_skips_paralympic_tournaments_and_events_but_keeps_junior_and_senior() -> None:
+def test_live_ingestion_excludes_para_and_junior_boundaries_but_keeps_senior() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -91,14 +95,17 @@ def test_live_ingestion_skips_paralympic_tournaments_and_events_but_keeps_junior
         match_keys = set(session.scalars(select(Match.source_match_key)).all())
         player_names = set(session.scalars(select(Player.full_name)).all())
 
-    assert client.live_tournament_ids == [20, 30]
+    # Tournament 20 must be filtered before its match endpoint is called.
+    assert client.live_tournament_ids == [30]
     assert result == {
         "status": "ok",
-        "tournaments": 2,
-        "live_matches": 2,
+        "tournaments": 1,
+        "live_matches": 1,
         "skipped_paralympic_tournaments": 1,
         "skipped_paralympic_matches": 1,
+        "skipped_junior_tournaments": 1,
+        "skipped_junior_matches": 1,
     }
-    assert tournament_names == {"European Junior Championships", "Continental Senior Championships"}
-    assert match_keys == {"BWF_LIVE:2001", "BWF_LIVE:3002"}
-    assert player_names == {"Junior One", "Junior Two", "Senior One", "Senior Two"}
+    assert tournament_names == {"Continental Senior Championships"}
+    assert match_keys == {"BWF_LIVE:3002"}
+    assert player_names == {"Senior One", "Senior Two"}

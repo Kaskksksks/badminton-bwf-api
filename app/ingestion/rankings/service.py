@@ -54,10 +54,11 @@ class RankingScope:
         return self.discipline in {"MD", "WD", "XD"}
 
 
+# Senior-only scope: retain World and World Tour rankings across all five disciplines.
+# World Junior collection is intentionally excluded under the cost-control policy.
 RANKING_FAMILIES: tuple[tuple[str, str, int, int], ...] = (
     ("WORLD", "SENIOR", 2, 6),
     ("WORLD_TOUR", "SENIOR", 9, 57),
-    ("WORLD_JUNIOR", "JUNIOR_YOUTH", 1, 1),
 )
 
 
@@ -361,7 +362,7 @@ def ensure_live_collection_allowed(settings: Settings) -> None:
 
 
 def synchronize_rankings(session: Session, settings: Settings | None = None, client: BWFRankingClient | None = None) -> dict[str, int | str]:
-    """Fetch and store all fifteen requested ranking scopes as immutable snapshots."""
+    """Fetch and store the ten requested senior ranking scopes as immutable snapshots."""
 
     settings = settings or get_settings()
     ensure_live_collection_allowed(settings)

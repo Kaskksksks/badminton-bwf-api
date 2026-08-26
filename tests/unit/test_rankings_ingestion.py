@@ -76,16 +76,16 @@ def test_imports_all_requested_scopes_and_is_idempotent() -> None:
     with Session(engine) as session:
         first = synchronize_rankings(session, settings=settings, client=FakeRankingClient())
         session.commit()
-        assert first["created_scopes"] == 15
-        assert first["accepted_entries"] == 15
-        assert session.scalar(select(RankingSnapshot).where(RankingSnapshot.ranking_system == "WORLD_JUNIOR")) is not None
-        assert len(session.scalars(select(RankingEntry)).all()) == 15
+        assert first["created_scopes"] == 10
+        assert first["accepted_entries"] == 10
+        assert session.scalar(select(RankingSnapshot).where(RankingSnapshot.ranking_system == "WORLD_JUNIOR")) is None
+        assert len(session.scalars(select(RankingEntry)).all()) == 10
 
         second = synchronize_rankings(session, settings=settings, client=FakeRankingClient())
         session.commit()
         assert second["created_scopes"] == 0
-        assert second["duplicate_scopes"] == 15
-        assert len(session.scalars(select(RankingSnapshot)).all()) == 15
+        assert second["duplicate_scopes"] == 10
+        assert len(session.scalars(select(RankingSnapshot)).all()) == 10
 
 
 def test_live_collection_is_refused_without_explicit_enablement() -> None:
