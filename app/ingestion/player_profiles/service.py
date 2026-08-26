@@ -27,7 +27,10 @@ from app.core.worker_safety import release_process_memory
 from app.db.models import (
     BatchStatus,
     DataSource,
+    Event,
     ImportBatch,
+    Match,
+    MatchParticipantContext,
     ParticipantMember,
     Player,
     PlayerAlias,
@@ -37,6 +40,13 @@ from app.db.models import (
     ReconciliationCase,
     SourceEntityIdentifier,
     SourceKind,
+    Tournament,
+)
+from app.ingestion.adapters.bwf.eligibility import (
+    is_junior_match,
+    is_junior_tournament,
+    is_paralympic_match,
+    is_paralympic_tournament,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +55,29 @@ RESOLVER_VERSION = "bwf-profile-auto-resolver-v2"
 SOURCE_CODE = "BWF_OFFICIAL_PLAYER_PROFILES"
 SOURCE_NAME = "BWF official player profiles"
 NO_EXACT_CANDIDATE_CASE_TYPE = "PLAYER_IDENTITY_NO_EXACT_CANDIDATE"
+NO_SENIOR_CONTEXT_CASE_TYPE = "PLAYER_IDENTITY_NO_SENIOR_CONTEXT"
+
+
+@dataclass(frozen=True)
+class AliasContextSummary:
+    """Aggregate stored source contexts without assigning a category to a person."""
+
+    senior_contexts: int = 0
+    junior_contexts: int = 0
+    para_contexts: int = 0
+    unclassified_contexts: int = 0
+
+    @property
+    def eligible_for_profile_search(self) -> bool:
+        return self.senior_contexts > 0
+
+    def evidence(self) -> dict[str, int]:
+        return {
+            "senior_contexts": self.senior_contexts,
+            "junior_contexts": self.junior_contexts,
+            "para_contexts": self.para_contexts,
+            "unclassified_contexts": self.unclassified_contexts,
+        }
 
 
 class SourceAccessStopped(RuntimeError):
@@ -348,6 +381,77 @@ def record_no_exact_candidate_case(session: Session, alias: PlayerAlias, raw: Ra
     return existing
 
 
+def context_summary_for_alias(session: Session, alias: PlayerAlias) -> AliasContextSummary:
+    """Classify only the alias's stored match contexts at tournament/event boundaries.
+
+    This function never classifies a person. An alias is eligible only if at least one
+    existing context is explicitly neither junior nor Para; missing context is not proof.
+    """
+    rows = session.execute(
+        select(Tournament, Event)
+        .select_from(ParticipantMember)
+        .join(MatchParticipantContext, MatchParticipantContext.participant_id == ParticipantMember.participant_id)
+        .join(Match, Match.id == MatchParticipantContext.match_id)
+        .outerjoin(Tournament, Tournament.id == Match.tournament_id)
+        .outerjoin(Event, Event.id == Match.event_id)
+        .where(ParticipantMember.source_alias_id == alias.id)
+    ).all()
+    counts = {"senior": 0, "junior": 0, "para": 0, "unclassified": 0}
+    for tournament, event in rows:
+        if tournament is None or event is None:
+            counts["unclassified"] += 1
+            continue
+        tournament_payload = {
+            "name": tournament.source_name_raw or tournament.name,
+            "title": tournament.name,
+            "category": None,
+        }
+        event_envelope = {
+            "live_detail": {"event": event.event_type, "category": event.category},
+            "match_detail": {"event": event.event_type, "category": event.category},
+        }
+        if is_paralympic_tournament(tournament_payload) or is_paralympic_match(event_envelope):
+            counts["para"] += 1
+        elif is_junior_tournament(tournament_payload) or is_junior_match(event_envelope):
+            counts["junior"] += 1
+        else:
+            counts["senior"] += 1
+    return AliasContextSummary(
+        senior_contexts=counts["senior"],
+        junior_contexts=counts["junior"],
+        para_contexts=counts["para"],
+        unclassified_contexts=counts["unclassified"],
+    )
+
+
+def record_no_senior_context_case(session: Session, alias: PlayerAlias, context: AliasContextSummary) -> ReconciliationCase:
+    """Record a terminal local eligibility outcome without making an external request."""
+    existing = session.scalar(select(ReconciliationCase).where(
+        ReconciliationCase.case_type == NO_SENIOR_CONTEXT_CASE_TYPE,
+        ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+        ReconciliationCase.candidate_entity_id == alias.id,
+        ReconciliationCase.status == "OPEN",
+    ))
+    if existing is None:
+        aggregate = context.evidence()
+        existing = ReconciliationCase(
+            case_type=NO_SENIOR_CONTEXT_CASE_TYPE,
+            status="OPEN",
+            candidate_entity_type="PLAYER_ALIAS",
+            candidate_entity_id=alias.id,
+            rationale=(
+                "No recoverable senior, non-Para source context permits an automatic official BWF profile search; "
+                f"senior_contexts={aggregate['senior_contexts']}; junior_contexts={aggregate['junior_contexts']}; "
+                f"para_contexts={aggregate['para_contexts']}; unclassified_contexts={aggregate['unclassified_contexts']}. "
+                "The alias remains unlinked and is excluded from future automatic batches unless an explicit "
+                "senior-context recheck workflow is added."
+            ),
+        )
+        session.add(existing)
+        session.flush()
+    return existing
+
+
 def upsert_canonical_profile(session: Session, source: DataSource, response: SourceResponse) -> tuple[Player, PlayerProfileSnapshot]:
     raw = persist_raw(session, source, response)
     profile = extract_profile(response.payload)
@@ -465,7 +569,16 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
     session.flush()
     created_client = client is None
     client = client or BWFPlayerProfileClient(settings)
-    summary = {"selected": 0, "confirmed_auto": 0, "provisional": 0, "conflicted": 0, "unresolved": 0, "errors": 0, "source_stopped": 0}
+    summary = {
+        "selected": 0,
+        "confirmed_auto": 0,
+        "provisional": 0,
+        "conflicted": 0,
+        "unresolved": 0,
+        "no_senior_context": 0,
+        "errors": 0,
+        "source_stopped": 0,
+    }
     try:
         current_resolver_link_exists = select(PlayerIdentityLink.id).where(
             PlayerIdentityLink.alias_id == PlayerAlias.id,
@@ -483,6 +596,12 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
             ReconciliationCase.candidate_entity_id == PlayerAlias.id,
             ReconciliationCase.status == "OPEN",
         ).exists()
+        open_no_senior_context_case_exists = select(ReconciliationCase.id).where(
+            ReconciliationCase.case_type == NO_SENIOR_CONTEXT_CASE_TYPE,
+            ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+            ReconciliationCase.candidate_entity_id == PlayerAlias.id,
+            ReconciliationCase.status == "OPEN",
+        ).exists()
         aliases = session.scalars(
             select(PlayerAlias)
             .where(
@@ -490,6 +609,7 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
                 ~current_resolver_link_exists,
                 ~open_source_error_case_exists,
                 ~open_no_exact_candidate_case_exists,
+                ~open_no_senior_context_case_exists,
             )
             .order_by(PlayerAlias.created_at)
             .limit(settings.bwf_player_profiles_batch_size)
@@ -497,6 +617,13 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
         source_stop: SourceAccessStopped | None = None
         for alias in aliases:
             summary["selected"] += 1
+            context = context_summary_for_alias(session, alias)
+            if not context.eligible_for_profile_search:
+                record_no_senior_context_case(session, alias, context)
+                summary["no_senior_context"] += 1
+                if summary["selected"] % settings.bwf_player_profiles_transaction_chunk_size == 0:
+                    checkpoint_batch_memory(session, summary, reason="chunk_complete")
+                continue
             try:
                 search = client.search(alias.alias_text)
             except SourceAccessStopped as exc:
@@ -548,7 +675,7 @@ def run_full_queue(session: Session, settings: Settings | None = None, client: B
         batch.completed_at = utcnow()
         batch.input_row_count = summary["selected"]
         batch.accepted_count = summary["confirmed_auto"] + summary["provisional"]
-        batch.rejected_count = summary["conflicted"] + summary["unresolved"]
+        batch.rejected_count = summary["conflicted"] + summary["unresolved"] + summary["no_senior_context"]
         session.flush()
         checkpoint_batch_memory(session, summary, reason="batch_complete")
         return summary

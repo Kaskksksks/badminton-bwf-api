@@ -8,13 +8,28 @@ from sqlalchemy.orm import Session
 from app.api.v1.routes import identity_coverage
 from app.core.config import Settings
 from app.db.base import Base
-from app.db.models import DataSource, ImportBatch, Player, PlayerAlias, PlayerProfileSnapshot, ReconciliationCase
+from app.db.models import (
+    DataSource,
+    Event,
+    ImportBatch,
+    Match,
+    MatchParticipantContext,
+    Participant,
+    ParticipantMember,
+    Player,
+    PlayerAlias,
+    PlayerProfileSnapshot,
+    ReconciliationCase,
+    Tournament,
+)
 from app.ingestion.player_profiles.service import (
     BWFPlayerProfileClient,
     Candidate,
     NO_EXACT_CANDIDATE_CASE_TYPE,
+    NO_SENIOR_CONTEXT_CASE_TYPE,
     SourceAccessStopped,
     SourceResponse,
+    context_summary_for_alias,
     decide_alias,
     ensure_collection_allowed,
     extract_candidates,
@@ -155,10 +170,11 @@ def test_only_two_fixed_endpoint_methods_are_exposed() -> None:
     assert set(name for name in dir(BWFPlayerProfileClient) if not name.startswith("_")) >= {"search", "summary", "close"}
 
 
-def test_no_historical_match_import_or_mutation_symbols() -> None:
+def test_identity_selector_reads_context_without_historical_import_or_match_mutation_symbols() -> None:
     import app.ingestion.player_profiles.service as service
-    assert not hasattr(service, "Match")
+    assert hasattr(service, "Match")
     assert not hasattr(service, "MatchGame")
+    assert not hasattr(service, "import_historical_seed")
 
 
 def test_youth_profile_type_is_preserved() -> None:
@@ -189,8 +205,19 @@ def test_unresolved_queue_checkpoints_and_releases_session_state(monkeypatch: py
             historical = DataSource(code="HISTORICAL_CHUNK_TEST", source_kind="HISTORICAL_SEED", display_name="Historical chunk test", base_url=None)
             session.add(historical)
             session.flush()
+            aliases = []
             for index in range(3):
-                session.add(PlayerAlias(source_id=historical.id, alias_text=f"No Match {index}", normalized_alias=f"NO MATCH {index}"))
+                alias = PlayerAlias(source_id=historical.id, alias_text=f"No Match {index}", normalized_alias=f"NO MATCH {index}")
+                session.add(alias)
+                session.flush()
+                add_source_context(
+                    session,
+                    alias,
+                    context_key=f"checkpoint-{index}",
+                    tournament_name="Senior Continental Championships",
+                    event_type="MS",
+                )
+                aliases.append(alias)
             session.commit()
             checkpoints: list[tuple[int, str]] = []
 
@@ -261,7 +288,16 @@ def test_server_error_is_persisted_as_skipped_exception_without_raising() -> Non
             historical = DataSource(code="HISTORICAL_TEST", source_kind="HISTORICAL_SEED", display_name="Historical test", base_url=None)
             session.add(historical)
             session.flush()
-            session.add(PlayerAlias(source_id=historical.id, alias_text="YU Yang (F)", normalized_alias="YU YANG F"))
+            alias = PlayerAlias(source_id=historical.id, alias_text="YU Yang (F)", normalized_alias="YU YANG F")
+            session.add(alias)
+            session.flush()
+            add_source_context(
+                session,
+                alias,
+                context_key="source-error",
+                tournament_name="Senior Continental Championships",
+                event_type="MS",
+            )
             session.commit()
             transport = httpx.MockTransport(lambda request: httpx.Response(500, request=request, json={"detail": "upstream error"}))
             client = BWFPlayerProfileClient(enabled_settings(), httpx.Client(base_url="https://example.test", transport=transport))
@@ -274,5 +310,120 @@ def test_server_error_is_persisted_as_skipped_exception_without_raising() -> Non
             case = session.scalar(select(ReconciliationCase).where(ReconciliationCase.case_type == "PLAYER_IDENTITY_SOURCE_ERROR"))
             assert case is not None
             assert case.candidate_entity_type == "PLAYER_ALIAS"
+    finally:
+        Base.metadata.drop_all(engine)
+
+
+def add_source_context(
+    session: Session,
+    alias: PlayerAlias,
+    *,
+    context_key: str,
+    tournament_name: str,
+    event_type: str,
+) -> None:
+    """Create one stored context using the historical importer relationship shape."""
+    participant = Participant(
+        participant_kind="SINGLES",
+        canonical_member_hash=f"participant-{context_key}",
+        display_name=alias.alias_text,
+    )
+    session.add(participant)
+    session.flush()
+    session.add(
+        ParticipantMember(
+            participant_id=participant.id,
+            member_order=1,
+            source_alias_id=alias.id,
+            source_alias_text=alias.alias_text,
+        )
+    )
+    tournament = Tournament(name=tournament_name, source_name_raw=tournament_name, status="COMPLETED")
+    session.add(tournament)
+    session.flush()
+    event = Event(tournament_id=tournament.id, event_type=event_type)
+    session.add(event)
+    session.flush()
+    match = Match(
+        source_match_key=f"context-{context_key}",
+        tournament_id=tournament.id,
+        event_id=event.id,
+        participant_1_id=participant.id,
+        status="COMPLETED",
+        completion_basis="TEST_CONTEXT",
+        source_completeness="COMPLETE",
+        historical_seed_flag=True,
+    )
+    session.add(match)
+    session.flush()
+    session.add(MatchParticipantContext(match_id=match.id, participant_id=participant.id, side=1))
+    session.flush()
+
+
+def test_identity_queue_requires_a_recoverable_senior_non_para_source_context() -> None:
+    class RecordingNoMatchClient:
+        def __init__(self) -> None:
+            self.search_calls: list[str] = []
+
+        def search(self, alias_text: str) -> SourceResponse:
+            self.search_calls.append(alias_text)
+            return SourceResponse("h2h-player-search", f"https://example.test/search?query={alias_text}", 200, [])
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            historical = DataSource(
+                code="HISTORICAL_CONTEXT_TEST",
+                source_kind="HISTORICAL_SEED",
+                display_name="Historical context test",
+                base_url=None,
+            )
+            session.add(historical)
+            session.flush()
+            senior = PlayerAlias(source_id=historical.id, alias_text="Senior Alias", normalized_alias="SENIOR ALIAS")
+            mixed = PlayerAlias(source_id=historical.id, alias_text="Mixed Alias", normalized_alias="MIXED ALIAS")
+            junior = PlayerAlias(source_id=historical.id, alias_text="Junior Alias", normalized_alias="JUNIOR ALIAS")
+            para = PlayerAlias(source_id=historical.id, alias_text="Para Alias", normalized_alias="PARA ALIAS")
+            contextless = PlayerAlias(source_id=historical.id, alias_text="Contextless Alias", normalized_alias="CONTEXTLESS ALIAS")
+            session.add_all((senior, mixed, junior, para, contextless))
+            session.flush()
+            add_source_context(session, senior, context_key="senior", tournament_name="Senior Continental Championships", event_type="MS")
+            add_source_context(session, mixed, context_key="mixed-junior", tournament_name="European Junior Championships", event_type="WD-U19")
+            add_source_context(session, mixed, context_key="mixed-senior", tournament_name="Senior Continental Championships", event_type="MS")
+            add_source_context(session, junior, context_key="junior", tournament_name="European Junior Championships", event_type="WD-U19")
+            add_source_context(session, para, context_key="para", tournament_name="Para Badminton International", event_type="WH1")
+            session.commit()
+
+            assert context_summary_for_alias(session, senior).eligible_for_profile_search is True
+            assert context_summary_for_alias(session, mixed).evidence() == {
+                "senior_contexts": 1,
+                "junior_contexts": 1,
+                "para_contexts": 0,
+                "unclassified_contexts": 0,
+            }
+            assert context_summary_for_alias(session, junior).eligible_for_profile_search is False
+            assert context_summary_for_alias(session, para).eligible_for_profile_search is False
+            assert context_summary_for_alias(session, contextless).eligible_for_profile_search is False
+
+            client = RecordingNoMatchClient()
+            summary = run_full_queue(
+                session,
+                enabled_settings(bwf_player_profiles_batch_size=5, bwf_player_profiles_transaction_chunk_size=1),
+                client,
+            )
+            assert client.search_calls == ["Senior Alias", "Mixed Alias"]
+            assert summary["selected"] == 5
+            assert summary["unresolved"] == 2
+            assert summary["no_senior_context"] == 3
+            assert len(session.scalars(select(ReconciliationCase).where(
+                ReconciliationCase.case_type == NO_SENIOR_CONTEXT_CASE_TYPE,
+                ReconciliationCase.status == "OPEN",
+            )).all()) == 3
+            coverage = identity_coverage(session)["data"]
+            assert coverage["aliases_no_senior_context"] == 3
+            assert coverage["aliases_no_exact_candidate"] == 2
+            assert coverage["eligible_queue_remaining"] == 0
+            assert coverage["queue_complete"] is True
     finally:
         Base.metadata.drop_all(engine)

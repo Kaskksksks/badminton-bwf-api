@@ -31,6 +31,7 @@ from app.core.config import get_settings
 from app.core.worker_safety import collection_slot
 from app.ingestion.player_profiles.service import (
     NO_EXACT_CANDIDATE_CASE_TYPE,
+    NO_SENIOR_CONTEXT_CASE_TYPE,
     RESOLVER_VERSION,
     run_full_queue,
 )
@@ -217,6 +218,11 @@ def identity_coverage(session: DbSession) -> dict[str, Any]:
         ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
         ReconciliationCase.status == "OPEN",
     )).all())
+    no_senior_context_alias_ids = set(session.scalars(select(ReconciliationCase.candidate_entity_id).where(
+        ReconciliationCase.case_type == NO_SENIOR_CONTEXT_CASE_TYPE,
+        ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+        ReconciliationCase.status == "OPEN",
+    )).all())
     resolver_link_alias_ids = set(session.scalars(select(PlayerIdentityLink.alias_id).where(
         PlayerIdentityLink.resolver_version == RESOLVER_VERSION,
     )).all())
@@ -225,6 +231,7 @@ def identity_coverage(session: DbSession) -> dict[str, Any]:
         and item.id not in resolver_link_alias_ids
         and item.id not in terminal_no_exact_alias_ids
         and item.id not in source_error_alias_ids
+        and item.id not in no_senior_context_alias_ids
         for item in aliases
     )
     return {
@@ -238,11 +245,12 @@ def identity_coverage(session: DbSession) -> dict[str, Any]:
             "rejected_links": sum(item.decision_status == "REJECTED_MANUAL" for item in links),
             "aliases_no_exact_candidate": len(terminal_no_exact_alias_ids),
             "aliases_source_error_quarantined": len(source_error_alias_ids),
+            "aliases_no_senior_context": len(no_senior_context_alias_ids),
             "eligible_queue_remaining": eligible_queue_remaining,
             "queue_complete": eligible_queue_remaining == 0,
             "model_safe_identity_status": "CONFIRMED_ONLY",
         },
-        "meta": {**meta("BWF_OFFICIAL_PLAYER_PROFILES"), "notice": "Only confirmed aliases are eligible for verified player statistics and models. Queue completion means every alias is confirmed, conflicted, no-exact-candidate, or source-error quarantined."},
+        "meta": {**meta("BWF_OFFICIAL_PLAYER_PROFILES"), "notice": "Only confirmed aliases are eligible for verified player statistics and models. Queue completion means every alias is confirmed, conflicted, no-exact-candidate, source-error quarantined, or excluded from automatic processing because it lacks a recoverable senior source context."},
     }
 
 
