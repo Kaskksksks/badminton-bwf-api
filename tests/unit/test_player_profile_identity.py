@@ -24,7 +24,9 @@ from app.db.models import (
     ReconciliationCase,
     Tournament,
 )
+from app.ingestion.player_profiles import service as player_profile_service
 from app.ingestion.player_profiles.service import (
+    AliasContextSummary,
     BWFPlayerProfileClient,
     Candidate,
     NO_EXACT_CANDIDATE_CASE_TYPE,
@@ -33,6 +35,7 @@ from app.ingestion.player_profiles.service import (
     RECENT_SENIOR_ELIGIBLE_CASE_TYPE,
     SourceAccessStopped,
     SourceResponse,
+    context_summaries_for_aliases,
     context_summary_for_alias,
     context_summary_for_player,
     decide_alias,
@@ -578,5 +581,124 @@ def test_local_classification_sweep_makes_no_bwf_requests_and_is_idempotent() ->
             repeat = run_local_classification_sweep(session, batch_size=4)
             assert repeat["selected"] == 0
             assert repeat["bwf_requests_made"] == 0
+    finally:
+        Base.metadata.drop_all(engine)
+
+
+def test_local_classification_sweep_bulk_aggregates_contexts_without_per_alias_or_bwf_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            historical = DataSource(
+                code="HISTORICAL_BULK_LOCAL_SWEEP_TEST",
+                source_kind="HISTORICAL_SEED",
+                display_name="Historical bulk local sweep test",
+                base_url=None,
+            )
+            session.add(historical)
+            session.flush()
+            recent = PlayerAlias(source_id=historical.id, alias_text="Recent", normalized_alias="RECENT")
+            retired = PlayerAlias(source_id=historical.id, alias_text="Retired", normalized_alias="RETIRED")
+            stale = PlayerAlias(source_id=historical.id, alias_text="Stale", normalized_alias="STALE")
+            scheduled = PlayerAlias(source_id=historical.id, alias_text="Scheduled", normalized_alias="SCHEDULED")
+            junior = PlayerAlias(source_id=historical.id, alias_text="Junior", normalized_alias="JUNIOR")
+            para = PlayerAlias(source_id=historical.id, alias_text="Para", normalized_alias="PARA")
+            mixed = PlayerAlias(source_id=historical.id, alias_text="Mixed", normalized_alias="MIXED")
+            contextless = PlayerAlias(source_id=historical.id, alias_text="Contextless", normalized_alias="CONTEXTLESS")
+            aliases = (recent, retired, stale, scheduled, junior, para, mixed, contextless)
+            session.add_all(aliases)
+            session.flush()
+            add_source_context(session, recent, context_key="bulk-recent", tournament_name="Senior Continental Championships", event_type="MS")
+            add_source_context(session, retired, context_key="bulk-retired", tournament_name="Senior Continental Championships", event_type="WS", match_status="RETIRED")
+            add_source_context(session, stale, context_key="bulk-stale", tournament_name="Senior Continental Championships", event_type="MS", match_date=date.today() - timedelta(weeks=53))
+            add_source_context(session, scheduled, context_key="bulk-scheduled", tournament_name="Senior Continental Championships", event_type="MS", match_status="SCHEDULED")
+            add_source_context(session, junior, context_key="bulk-junior", tournament_name="European Junior Championships", event_type="MS-U19")
+            add_source_context(session, para, context_key="bulk-para", tournament_name="Para Badminton International", event_type="WH1")
+            add_source_context(session, mixed, context_key="bulk-mixed-junior", tournament_name="European Junior Championships", event_type="MS-U19")
+            add_source_context(session, mixed, context_key="bulk-mixed-senior", tournament_name="Senior Continental Championships", event_type="MS")
+            session.commit()
+
+            bulk_contexts = context_summaries_for_aliases(session, [alias.id for alias in aliases])
+            assert {
+                alias.id: bulk_contexts[alias.id].evidence()
+                for alias in aliases
+            } == {
+                alias.id: context_summary_for_alias(session, alias).evidence()
+                for alias in aliases
+            }
+
+            def prohibited_per_alias_summary(*args: object, **kwargs: object) -> AliasContextSummary:
+                raise AssertionError("the bulk sweep must not call context_summary_for_alias")
+
+            class ProhibitedBWFClient:
+                def __init__(self, *args: object, **kwargs: object) -> None:
+                    raise AssertionError("the local sweep must not construct a BWF client")
+
+            monkeypatch.setattr(player_profile_service, "context_summary_for_alias", prohibited_per_alias_summary)
+            monkeypatch.setattr(player_profile_service, "BWFPlayerProfileClient", ProhibitedBWFClient)
+
+            summary = run_local_classification_sweep(session, batch_size=8)
+            assert summary == {
+                "selected": 8,
+                "confirmed_auto": 0,
+                "provisional": 0,
+                "conflicted": 0,
+                "unresolved": 0,
+                "no_senior_context": 3,
+                "no_recent_senior_activity": 2,
+                "retained_recent_senior_candidates": 3,
+                "skipped_terminal": 0,
+                "bwf_requests_made": 0,
+                "errors": 0,
+                "source_stopped": 0,
+            }
+            assert identity_coverage(session)["data"]["local_classification_remaining"] == 0
+            assert run_local_classification_sweep(session, batch_size=8)["selected"] == 0
+            with pytest.raises(ValueError, match="between 1 and 500"):
+                run_local_classification_sweep(session, batch_size=501)
+    finally:
+        Base.metadata.drop_all(engine)
+
+
+def test_local_classification_sweep_keeps_50_alias_memory_checkpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            historical = DataSource(
+                code="HISTORICAL_BULK_CHECKPOINT_TEST",
+                source_kind="HISTORICAL_SEED",
+                display_name="Historical bulk checkpoint test",
+                base_url=None,
+            )
+            session.add(historical)
+            session.flush()
+            session.add_all(
+                PlayerAlias(
+                    source_id=historical.id,
+                    alias_text=f"Contextless {index}",
+                    normalized_alias=f"CONTEXTLESS {index}",
+                )
+                for index in range(51)
+            )
+            session.commit()
+
+            checkpoint_reasons: list[str] = []
+            original_checkpoint = player_profile_service.checkpoint_batch_memory
+
+            def recording_checkpoint(
+                checkpoint_session: Session, summary: dict[str, int], *, reason: str
+            ) -> None:
+                checkpoint_reasons.append(reason)
+                original_checkpoint(checkpoint_session, summary, reason=reason)
+
+            monkeypatch.setattr(player_profile_service, "checkpoint_batch_memory", recording_checkpoint)
+            summary = run_local_classification_sweep(session, batch_size=51)
+            assert summary["no_senior_context"] == 51
+            assert checkpoint_reasons == [
+                "local_classification_chunk_complete",
+                "local_classification_complete",
+            ]
     finally:
         Base.metadata.drop_all(engine)

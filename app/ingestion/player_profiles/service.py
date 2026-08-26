@@ -452,6 +452,68 @@ def _context_summary_for_alias_ids(session: Session, alias_ids: list[str], *, as
     )
 
 
+def context_summaries_for_aliases(
+    session: Session, alias_ids: list[str], *, as_of: date | None = None
+) -> dict[str, AliasContextSummary]:
+    """Return one stored-context summary per alias with one set-based context query.
+
+    The classification rules intentionally remain identical to ``context_summary_for_alias``.
+    This helper only removes the former N+1 query pattern when a bounded local-only
+    sweep evaluates many aliases at once.
+    """
+    if not alias_ids:
+        return {}
+    cutoff = (as_of or utcnow().date()) - timedelta(weeks=52)
+    counts = {
+        alias_id: {"senior": 0, "recent_senior": 0, "junior": 0, "para": 0, "unclassified": 0, "latest": None}
+        for alias_id in alias_ids
+    }
+    rows = session.execute(
+        select(ParticipantMember.source_alias_id, Tournament, Event, Match.match_date, Match.status)
+        .select_from(ParticipantMember)
+        .join(MatchParticipantContext, MatchParticipantContext.participant_id == ParticipantMember.participant_id)
+        .join(Match, Match.id == MatchParticipantContext.match_id)
+        .outerjoin(Tournament, Tournament.id == Match.tournament_id)
+        .outerjoin(Event, Event.id == Match.event_id)
+        .where(ParticipantMember.source_alias_id.in_(alias_ids))
+    ).all()
+    for alias_id, tournament, event, match_date, match_status in rows:
+        aggregate = counts[alias_id]
+        if tournament is None or event is None:
+            aggregate["unclassified"] += 1
+            continue
+        tournament_payload = {
+            "name": tournament.source_name_raw or tournament.name,
+            "title": tournament.name,
+            "category": None,
+        }
+        event_envelope = {
+            "live_detail": {"event": event.event_type, "category": event.category},
+            "match_detail": {"event": event.event_type, "category": event.category},
+        }
+        if is_paralympic_tournament(tournament_payload) or is_paralympic_match(event_envelope):
+            aggregate["para"] += 1
+        elif is_junior_tournament(tournament_payload) or is_junior_match(event_envelope):
+            aggregate["junior"] += 1
+        else:
+            aggregate["senior"] += 1
+            if match_date and (aggregate["latest"] is None or match_date > aggregate["latest"]):
+                aggregate["latest"] = match_date
+            if match_date and match_date >= cutoff and match_status in {"COMPLETED", "RETIRED"}:
+                aggregate["recent_senior"] += 1
+    return {
+        alias_id: AliasContextSummary(
+            senior_contexts=aggregate["senior"],
+            recent_senior_participations=aggregate["recent_senior"],
+            latest_senior_match_date=aggregate["latest"],
+            junior_contexts=aggregate["junior"],
+            para_contexts=aggregate["para"],
+            unclassified_contexts=aggregate["unclassified"],
+        )
+        for alias_id, aggregate in counts.items()
+    }
+
+
 def context_summary_for_alias(session: Session, alias: PlayerAlias, *, as_of: date | None = None) -> AliasContextSummary:
     return _context_summary_for_alias_ids(session, [alias.id], as_of=as_of)
 
@@ -557,10 +619,11 @@ def _classification_case_exists(case_type: str, *, require_open: bool = False):
 
 
 def run_local_classification_sweep(session: Session, *, batch_size: int = LOCAL_CLASSIFICATION_BATCH_SIZE) -> dict[str, int]:
-    """Classify a bounded alias slice using existing database evidence only.
+    """Classify one bounded alias slice from existing database evidence only.
 
-    This function deliberately never calls ``ensure_collection_allowed`` or instantiates
-    ``BWFPlayerProfileClient`` because it performs no BWF interaction.
+    This path deliberately never calls ``ensure_collection_allowed`` or instantiates
+    ``BWFPlayerProfileClient``. It uses one context query for the selected slice and
+    bulk-adds auditable local outcomes in bounded write chunks.
     """
     if not 1 <= batch_size <= LOCAL_CLASSIFICATION_BATCH_SIZE:
         raise ValueError(f"batch_size must be between 1 and {LOCAL_CLASSIFICATION_BATCH_SIZE}")
@@ -568,7 +631,7 @@ def run_local_classification_sweep(session: Session, *, batch_size: int = LOCAL_
         batch_type="BWF_PLAYER_PROFILE_LOCAL_CLASSIFICATION",
         status=BatchStatus.RUNNING.value,
         started_at=utcnow(),
-        importer_version=f"{RESOLVER_VERSION}-local-classification-v1",
+        importer_version=f"{RESOLVER_VERSION}-local-classification-v2",
     )
     session.add(batch)
     session.flush()
@@ -610,20 +673,79 @@ def run_local_classification_sweep(session: Session, *, batch_size: int = LOCAL_
             .order_by(PlayerAlias.created_at)
             .limit(batch_size)
         ).all()
+        alias_ids = [alias.id for alias in aliases]
+        contexts = context_summaries_for_aliases(session, alias_ids)
+        existing_cases = {
+            (case_type, candidate_entity_id, status)
+            for case_type, candidate_entity_id, status in session.execute(
+                select(
+                    ReconciliationCase.case_type,
+                    ReconciliationCase.candidate_entity_id,
+                    ReconciliationCase.status,
+                ).where(
+                    ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+                    ReconciliationCase.candidate_entity_id.in_(alias_ids),
+                    ReconciliationCase.case_type.in_((
+                        NO_SENIOR_CONTEXT_CASE_TYPE,
+                        NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
+                        RECENT_SENIOR_ELIGIBLE_CASE_TYPE,
+                    )),
+                )
+            ).all()
+        }
+        pending_cases: list[ReconciliationCase] = []
         for alias in aliases:
             summary["selected"] += 1
-            context = context_summary_for_alias(session, alias)
+            context = contexts[alias.id]
+            evidence = context.evidence()
             if not context.has_senior_context:
-                record_no_senior_context_case(session, alias, context)
+                case_type = NO_SENIOR_CONTEXT_CASE_TYPE
+                case_status = "OPEN"
+                rationale = (
+                    "No recoverable senior, non-Para source context permits an automatic official BWF profile search; "
+                    f"senior_contexts={evidence['senior_contexts']}; junior_contexts={evidence['junior_contexts']}; "
+                    f"para_contexts={evidence['para_contexts']}; unclassified_contexts={evidence['unclassified_contexts']}. "
+                    "The alias remains unlinked and is excluded from future automatic batches unless an explicit "
+                    "senior-context recheck workflow is added."
+                )
                 summary["no_senior_context"] += 1
             elif not context.eligible_for_profile_search:
-                record_no_recent_senior_activity_case(session, alias, context)
+                case_type = NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE
+                case_status = "OPEN"
+                rationale = (
+                    "No dated COMPLETED or RETIRED senior, non-Para official match exists within the rolling 52-week "
+                    "eligibility window; no official BWF profile request was made. "
+                    f"senior_contexts={evidence['senior_contexts']}; "
+                    f"recent_senior_participations={evidence['recent_senior_participations']}; "
+                    f"latest_senior_match_date={evidence['latest_senior_match_date']}. "
+                    "The alias remains unlinked and is excluded from future automatic batches unless a new qualifying "
+                    "senior match context is stored."
+                )
                 summary["no_recent_senior_activity"] += 1
             else:
-                record_recent_senior_eligible_case(session, alias, context)
+                case_type = RECENT_SENIOR_ELIGIBLE_CASE_TYPE
+                case_status = "RESOLVED"
+                rationale = (
+                    "Stored source context proves at least one dated COMPLETED or RETIRED senior, non-Para official "
+                    "match within the rolling 52-week window. No official BWF request was made by local classification. "
+                    f"recent_senior_participations={evidence['recent_senior_participations']}; "
+                    f"latest_senior_match_date={evidence['latest_senior_match_date']}."
+                )
                 summary["retained_recent_senior_candidates"] += 1
-            if summary["selected"] % LOCAL_CLASSIFICATION_TRANSACTION_CHUNK_SIZE == 0:
+            if (case_type, alias.id, case_status) not in existing_cases:
+                pending_cases.append(ReconciliationCase(
+                    case_type=case_type,
+                    status=case_status,
+                    candidate_entity_type="PLAYER_ALIAS",
+                    candidate_entity_id=alias.id,
+                    rationale=rationale,
+                ))
+            if len(pending_cases) >= LOCAL_CLASSIFICATION_TRANSACTION_CHUNK_SIZE:
+                session.add_all(pending_cases)
+                pending_cases.clear()
                 checkpoint_batch_memory(session, summary, reason="local_classification_chunk_complete")
+        if pending_cases:
+            session.add_all(pending_cases)
         batch.status = BatchStatus.SUCCEEDED.value
         batch.completed_at = utcnow()
         batch.input_row_count = summary["selected"]
