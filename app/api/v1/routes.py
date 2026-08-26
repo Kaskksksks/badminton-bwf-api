@@ -28,6 +28,7 @@ from app.db.models import (
     Tournament,
 )
 from app.core.config import get_settings
+from app.core.worker_safety import collection_slot
 from app.ingestion.player_profiles.service import (
     NO_EXACT_CANDIDATE_CASE_TYPE,
     RESOLVER_VERSION,
@@ -259,9 +260,12 @@ def identity_review_queue(session: DbSession, page: int = Query(1, ge=1), page_s
 
 @router.post("/admin/identity/run", dependencies=[Depends(require_admin)])
 def run_identity_batch(session: DbSession) -> dict[str, Any]:
-    """Start one explicitly requested, bounded identity batch; it has no scheduler."""
-    summary = run_full_queue(session, get_settings())
-    session.commit()
+    """Start one explicit batch only when the live collector is idle."""
+    with collection_slot("identity_batch") as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail="Live polling is in progress; retry the manual identity batch after it finishes.")
+        summary = run_full_queue(session, get_settings())
+        session.commit()
     return {"data": summary, "meta": meta("BWF_OFFICIAL_PLAYER_PROFILES")}
 
 

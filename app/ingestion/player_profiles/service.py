@@ -7,12 +7,10 @@ resolves historical aliases only according to documented deterministic rules.
 """
 from __future__ import annotations
 
-import gc
 import hashlib
 import json
 import html
 import logging
-import os
 import re
 import time
 import unicodedata
@@ -25,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.core.worker_safety import release_process_memory
 from app.db.models import (
     BatchStatus,
     DataSource,
@@ -81,21 +80,11 @@ def canonical_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
-def process_resident_memory_bytes() -> int | None:
-    """Return Linux resident memory when available, without making batch control depend on it."""
-    try:
-        with open("/proc/self/statm", encoding="utf-8") as handle:
-            resident_pages = int(handle.read().split()[1])
-        return resident_pages * os.sysconf("SC_PAGE_SIZE")
-    except (FileNotFoundError, IndexError, OSError, ValueError):
-        return None
-
-
 def checkpoint_batch_memory(session: Session, summary: Mapping[str, int], *, reason: str) -> None:
     """Commit a bounded unit of work and release expired ORM state before continuing."""
     session.commit()
     session.expire_all()
-    gc.collect()
+    resident_memory_bytes = release_process_memory(reason=f"identity_{reason}")
     logger.info(
         "player_identity_batch_checkpoint",
         extra={
@@ -105,7 +94,7 @@ def checkpoint_batch_memory(session: Session, summary: Mapping[str, int], *, rea
             "conflicted": summary["conflicted"],
             "unresolved": summary["unresolved"],
             "errors": summary["errors"],
-            "resident_memory_bytes": process_resident_memory_bytes(),
+            "resident_memory_bytes": resident_memory_bytes,
         },
     )
 

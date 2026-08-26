@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import Settings, get_settings
+from app.core.worker_safety import collection_slot, release_process_memory
 from app.db.base import SessionLocal
 from app.ingestion.adapters.bwf.service import synchronize_current_bwf
 from app.ingestion.rankings.service import run_rankings_job
@@ -29,26 +30,38 @@ def interval_for_sync_result(settings: Settings, result: Mapping[str, int | str]
 
 
 def run_bwf_sync_job(scheduler: BackgroundScheduler | None = None) -> None:
-    """Synchronize once, then schedule the next run from the observed source state."""
+    """Synchronize once without overlapping a manual identity collection unit."""
     settings = get_settings()
-    try:
-        with SessionLocal.begin() as session:
-            result = synchronize_current_bwf(session, settings=settings)
-        interval_seconds, mode = interval_for_sync_result(settings, result)
-        if scheduler:
-            scheduler.reschedule_job(JOB_ID, trigger="interval", seconds=interval_seconds)
-        logger.info(
-            "bwf_sync_complete",
-            extra={**result, "polling_mode": mode, "next_interval_seconds": interval_seconds},
-        )
-    except Exception:
-        if scheduler:
-            scheduler.reschedule_job(
-                JOB_ID,
-                trigger="interval",
-                seconds=settings.poll_error_backoff_max_seconds,
+    with collection_slot("live_sync") as acquired:
+        if not acquired:
+            retry_seconds = min(settings.poll_live_match_seconds, settings.poll_error_backoff_max_seconds)
+            if scheduler:
+                scheduler.reschedule_job(JOB_ID, trigger="interval", seconds=retry_seconds)
+            logger.info(
+                "bwf_sync_deferred",
+                extra={"reason": "identity_batch_in_progress", "next_interval_seconds": retry_seconds},
             )
-        logger.exception("bwf_sync_failed")
+            return
+        try:
+            with SessionLocal.begin() as session:
+                result = synchronize_current_bwf(session, settings=settings)
+            interval_seconds, mode = interval_for_sync_result(settings, result)
+            if scheduler:
+                scheduler.reschedule_job(JOB_ID, trigger="interval", seconds=interval_seconds)
+            logger.info(
+                "bwf_sync_complete",
+                extra={**result, "polling_mode": mode, "next_interval_seconds": interval_seconds},
+            )
+        except Exception:
+            if scheduler:
+                scheduler.reschedule_job(
+                    JOB_ID,
+                    trigger="interval",
+                    seconds=settings.poll_error_backoff_max_seconds,
+                )
+            logger.exception("bwf_sync_failed")
+        finally:
+            release_process_memory(reason="live_sync_complete")
 
 
 def build_scheduler() -> BackgroundScheduler:
