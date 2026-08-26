@@ -57,6 +57,9 @@ SOURCE_NAME = "BWF official player profiles"
 NO_EXACT_CANDIDATE_CASE_TYPE = "PLAYER_IDENTITY_NO_EXACT_CANDIDATE"
 NO_SENIOR_CONTEXT_CASE_TYPE = "PLAYER_IDENTITY_NO_SENIOR_CONTEXT"
 NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE = "PLAYER_IDENTITY_NO_RECENT_SENIOR_ACTIVITY"
+RECENT_SENIOR_ELIGIBLE_CASE_TYPE = "PLAYER_IDENTITY_RECENT_SENIOR_ELIGIBLE"
+LOCAL_CLASSIFICATION_BATCH_SIZE = 500
+LOCAL_CLASSIFICATION_TRANSACTION_CHUNK_SIZE = 50
 
 
 @dataclass(frozen=True)
@@ -514,6 +517,127 @@ def record_no_recent_senior_activity_case(session: Session, alias: PlayerAlias, 
         session.add(existing)
         session.flush()
     return existing
+
+
+def record_recent_senior_eligible_case(session: Session, alias: PlayerAlias, context: AliasContextSummary) -> ReconciliationCase:
+    """Record local eligibility without contacting BWF or linking an identity."""
+    existing = session.scalar(select(ReconciliationCase).where(
+        ReconciliationCase.case_type == RECENT_SENIOR_ELIGIBLE_CASE_TYPE,
+        ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+        ReconciliationCase.candidate_entity_id == alias.id,
+    ))
+    if existing is None:
+        aggregate = context.evidence()
+        existing = ReconciliationCase(
+            case_type=RECENT_SENIOR_ELIGIBLE_CASE_TYPE,
+            status="RESOLVED",
+            candidate_entity_type="PLAYER_ALIAS",
+            candidate_entity_id=alias.id,
+            rationale=(
+                "Stored source context proves at least one dated COMPLETED or RETIRED senior, non-Para official "
+                "match within the rolling 52-week window. No official BWF request was made by local classification. "
+                f"recent_senior_participations={aggregate['recent_senior_participations']}; "
+                f"latest_senior_match_date={aggregate['latest_senior_match_date']}."
+            ),
+        )
+        session.add(existing)
+        session.flush()
+    return existing
+
+
+def _classification_case_exists(case_type: str, *, require_open: bool = False):
+    clauses = [
+        ReconciliationCase.case_type == case_type,
+        ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+        ReconciliationCase.candidate_entity_id == PlayerAlias.id,
+    ]
+    if require_open:
+        clauses.append(ReconciliationCase.status == "OPEN")
+    return select(ReconciliationCase.id).where(*clauses).exists()
+
+
+def run_local_classification_sweep(session: Session, *, batch_size: int = LOCAL_CLASSIFICATION_BATCH_SIZE) -> dict[str, int]:
+    """Classify a bounded alias slice using existing database evidence only.
+
+    This function deliberately never calls ``ensure_collection_allowed`` or instantiates
+    ``BWFPlayerProfileClient`` because it performs no BWF interaction.
+    """
+    if not 1 <= batch_size <= LOCAL_CLASSIFICATION_BATCH_SIZE:
+        raise ValueError(f"batch_size must be between 1 and {LOCAL_CLASSIFICATION_BATCH_SIZE}")
+    batch = ImportBatch(
+        batch_type="BWF_PLAYER_PROFILE_LOCAL_CLASSIFICATION",
+        status=BatchStatus.RUNNING.value,
+        started_at=utcnow(),
+        importer_version=f"{RESOLVER_VERSION}-local-classification-v1",
+    )
+    session.add(batch)
+    session.flush()
+    summary = {
+        "selected": 0,
+        "confirmed_auto": 0,
+        "provisional": 0,
+        "conflicted": 0,
+        "unresolved": 0,
+        "no_senior_context": 0,
+        "no_recent_senior_activity": 0,
+        "retained_recent_senior_candidates": 0,
+        "skipped_terminal": 0,
+        "bwf_requests_made": 0,
+        "errors": 0,
+        "source_stopped": 0,
+    }
+    try:
+        current_resolver_link_exists = select(PlayerIdentityLink.id).where(
+            PlayerIdentityLink.alias_id == PlayerAlias.id,
+            PlayerIdentityLink.resolver_version == RESOLVER_VERSION,
+        ).exists()
+        terminal_no_exact_case_exists = _classification_case_exists(NO_EXACT_CANDIDATE_CASE_TYPE, require_open=True)
+        source_error_case_exists = _classification_case_exists("PLAYER_IDENTITY_SOURCE_ERROR", require_open=True)
+        no_senior_context_case_exists = _classification_case_exists(NO_SENIOR_CONTEXT_CASE_TYPE, require_open=True)
+        no_recent_activity_case_exists = _classification_case_exists(NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE, require_open=True)
+        recent_senior_eligible_case_exists = _classification_case_exists(RECENT_SENIOR_ELIGIBLE_CASE_TYPE)
+        aliases = session.scalars(
+            select(PlayerAlias)
+            .where(
+                PlayerAlias.player_id.is_(None),
+                ~current_resolver_link_exists,
+                ~terminal_no_exact_case_exists,
+                ~source_error_case_exists,
+                ~no_senior_context_case_exists,
+                ~no_recent_activity_case_exists,
+                ~recent_senior_eligible_case_exists,
+            )
+            .order_by(PlayerAlias.created_at)
+            .limit(batch_size)
+        ).all()
+        for alias in aliases:
+            summary["selected"] += 1
+            context = context_summary_for_alias(session, alias)
+            if not context.has_senior_context:
+                record_no_senior_context_case(session, alias, context)
+                summary["no_senior_context"] += 1
+            elif not context.eligible_for_profile_search:
+                record_no_recent_senior_activity_case(session, alias, context)
+                summary["no_recent_senior_activity"] += 1
+            else:
+                record_recent_senior_eligible_case(session, alias, context)
+                summary["retained_recent_senior_candidates"] += 1
+            if summary["selected"] % LOCAL_CLASSIFICATION_TRANSACTION_CHUNK_SIZE == 0:
+                checkpoint_batch_memory(session, summary, reason="local_classification_chunk_complete")
+        batch.status = BatchStatus.SUCCEEDED.value
+        batch.completed_at = utcnow()
+        batch.input_row_count = summary["selected"]
+        batch.accepted_count = 0
+        batch.rejected_count = summary["no_senior_context"] + summary["no_recent_senior_activity"]
+        session.flush()
+        checkpoint_batch_memory(session, summary, reason="local_classification_complete")
+        return summary
+    except Exception as exc:
+        batch.status = BatchStatus.FAILED.value
+        batch.error_summary = str(exc)
+        batch.completed_at = utcnow()
+        session.flush()
+        raise
 
 
 def upsert_canonical_profile(session: Session, source: DataSource, response: SourceResponse) -> tuple[Player, PlayerProfileSnapshot]:

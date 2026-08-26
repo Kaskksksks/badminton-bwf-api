@@ -30,6 +30,7 @@ from app.ingestion.player_profiles.service import (
     NO_EXACT_CANDIDATE_CASE_TYPE,
     NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
     NO_SENIOR_CONTEXT_CASE_TYPE,
+    RECENT_SENIOR_ELIGIBLE_CASE_TYPE,
     SourceAccessStopped,
     SourceResponse,
     context_summary_for_alias,
@@ -40,6 +41,7 @@ from app.ingestion.player_profiles.service import (
     extract_profile,
     normalize_name,
     run_full_queue,
+    run_local_classification_sweep,
 )
 
 
@@ -520,5 +522,61 @@ def test_confirmed_player_activity_summary_requires_recent_senior_participation(
 
             assert context_summary_for_player(session, active_player).eligible_for_profile_search is True
             assert context_summary_for_player(session, inactive_player).activity_status == "NOT_RECENTLY_ACTIVE"
+    finally:
+        Base.metadata.drop_all(engine)
+
+
+def test_local_classification_sweep_makes_no_bwf_requests_and_is_idempotent() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            historical = DataSource(
+                code="HISTORICAL_LOCAL_SWEEP_TEST",
+                source_kind="HISTORICAL_SEED",
+                display_name="Historical local sweep test",
+                base_url=None,
+            )
+            session.add(historical)
+            session.flush()
+            recent = PlayerAlias(source_id=historical.id, alias_text="Recent Eligible", normalized_alias="RECENT ELIGIBLE")
+            stale = PlayerAlias(source_id=historical.id, alias_text="Stale Alias", normalized_alias="STALE ALIAS")
+            junior = PlayerAlias(source_id=historical.id, alias_text="Junior Alias", normalized_alias="JUNIOR ALIAS")
+            contextless = PlayerAlias(source_id=historical.id, alias_text="Contextless Alias", normalized_alias="CONTEXTLESS ALIAS")
+            session.add_all((recent, stale, junior, contextless))
+            session.flush()
+            add_source_context(session, recent, context_key="sweep-recent", tournament_name="Senior Continental Championships", event_type="MS", match_date=date.today())
+            add_source_context(session, stale, context_key="sweep-stale", tournament_name="Senior Continental Championships", event_type="WS", match_date=date.today() - timedelta(weeks=53))
+            add_source_context(session, junior, context_key="sweep-junior", tournament_name="European Junior Championships", event_type="WD-U19", match_date=date.today())
+            session.commit()
+
+            summary = run_local_classification_sweep(session, batch_size=4)
+            assert summary == {
+                "selected": 4,
+                "confirmed_auto": 0,
+                "provisional": 0,
+                "conflicted": 0,
+                "unresolved": 0,
+                "no_senior_context": 2,
+                "no_recent_senior_activity": 1,
+                "retained_recent_senior_candidates": 1,
+                "skipped_terminal": 0,
+                "bwf_requests_made": 0,
+                "errors": 0,
+                "source_stopped": 0,
+            }
+            assert len(session.scalars(select(ReconciliationCase).where(
+                ReconciliationCase.case_type == RECENT_SENIOR_ELIGIBLE_CASE_TYPE,
+            )).all()) == 1
+            coverage = identity_coverage(session)["data"]
+            assert coverage["aliases_no_senior_context"] == 2
+            assert coverage["aliases_no_recent_senior_activity"] == 1
+            assert coverage["aliases_recent_senior_eligible"] == 1
+            assert coverage["local_classification_remaining"] == 0
+            assert coverage["eligible_queue_remaining"] == 1
+
+            repeat = run_local_classification_sweep(session, batch_size=4)
+            assert repeat["selected"] == 0
+            assert repeat["bwf_requests_made"] == 0
     finally:
         Base.metadata.drop_all(engine)

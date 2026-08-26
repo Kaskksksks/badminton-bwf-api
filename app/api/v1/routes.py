@@ -33,9 +33,11 @@ from app.ingestion.player_profiles.service import (
     NO_EXACT_CANDIDATE_CASE_TYPE,
     NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
     NO_SENIOR_CONTEXT_CASE_TYPE,
+    RECENT_SENIOR_ELIGIBLE_CASE_TYPE,
     RESOLVER_VERSION,
     context_summary_for_player,
     run_full_queue,
+    run_local_classification_sweep,
 )
 from app.statistics.service import interval_coverage_summary, interval_metrics_for_participant
 
@@ -237,6 +239,11 @@ def identity_coverage(session: DbSession) -> dict[str, Any]:
         ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
         ReconciliationCase.status == "OPEN",
     )).all())
+    recent_senior_eligible_alias_ids = set(session.scalars(select(ReconciliationCase.candidate_entity_id).where(
+        ReconciliationCase.case_type == RECENT_SENIOR_ELIGIBLE_CASE_TYPE,
+        ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+        ReconciliationCase.status == "RESOLVED",
+    )).all())
     resolver_link_alias_ids = set(session.scalars(select(PlayerIdentityLink.alias_id).where(
         PlayerIdentityLink.resolver_version == RESOLVER_VERSION,
     )).all())
@@ -247,6 +254,16 @@ def identity_coverage(session: DbSession) -> dict[str, Any]:
         and item.id not in source_error_alias_ids
         and item.id not in no_senior_context_alias_ids
         and item.id not in no_recent_senior_activity_alias_ids
+        for item in aliases
+    )
+    local_classification_remaining = sum(
+        item.player_id is None
+        and item.id not in resolver_link_alias_ids
+        and item.id not in terminal_no_exact_alias_ids
+        and item.id not in source_error_alias_ids
+        and item.id not in no_senior_context_alias_ids
+        and item.id not in no_recent_senior_activity_alias_ids
+        and item.id not in recent_senior_eligible_alias_ids
         for item in aliases
     )
     return {
@@ -262,6 +279,8 @@ def identity_coverage(session: DbSession) -> dict[str, Any]:
             "aliases_source_error_quarantined": len(source_error_alias_ids),
             "aliases_no_senior_context": len(no_senior_context_alias_ids),
             "aliases_no_recent_senior_activity": len(no_recent_senior_activity_alias_ids),
+            "aliases_recent_senior_eligible": len(recent_senior_eligible_alias_ids),
+            "local_classification_remaining": local_classification_remaining,
             "eligible_queue_remaining": eligible_queue_remaining,
             "queue_complete": eligible_queue_remaining == 0,
             "model_safe_identity_status": "CONFIRMED_ONLY",
@@ -292,6 +311,17 @@ def run_identity_batch(session: DbSession) -> dict[str, Any]:
         summary = run_full_queue(session, get_settings())
         session.commit()
     return {"data": summary, "meta": meta("BWF_OFFICIAL_PLAYER_PROFILES")}
+
+
+@router.post("/admin/identity/classify-local", dependencies=[Depends(require_admin)])
+def run_local_identity_classification(session: DbSession, batch_size: int = Query(500, ge=1, le=500)) -> dict[str, Any]:
+    """Classify one bounded local slice without instantiating an official BWF client."""
+    with collection_slot("identity_local_classification") as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail="Live polling or an identity batch is in progress; retry local classification after it finishes.")
+        summary = run_local_classification_sweep(session, batch_size=batch_size)
+        session.commit()
+    return {"data": summary, "meta": {**meta("LOCAL_EXISTING_SOURCE_CONTEXT"), "notice": "No official BWF requests were made by this local classification operation."}}
 
 
 @router.post("/admin/identity/links/{link_id}/review", dependencies=[Depends(require_admin)])
