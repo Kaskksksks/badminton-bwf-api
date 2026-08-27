@@ -29,12 +29,18 @@ from app.db.models import (
 )
 from app.core.config import get_settings
 from app.core.worker_safety import collection_slot
+from app.ingestion.player_profiles.country_mismatch import (
+    COUNTRY_MISMATCH_POLICY_VERSION,
+    MANUAL_OVERRIDE_POLICY_VERSION,
+    evaluate_country_mismatch_evidence,
+)
 from app.ingestion.player_profiles.service import (
     NO_EXACT_CANDIDATE_CASE_TYPE,
     NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
     NO_SENIOR_CONTEXT_CASE_TYPE,
     RECENT_SENIOR_ELIGIBLE_CASE_TYPE,
     RESOLVER_VERSION,
+    context_summaries_for_aliases,
     context_summary_for_player,
     run_full_queue,
     run_local_classification_sweep,
@@ -51,6 +57,157 @@ def meta(source: str = "PLATFORM") -> dict[str, Any]:
 
 def page_payload(items: list[Any], page: int, page_size: int, total: int, source: str = "PLATFORM") -> dict[str, Any]:
     return {"data": items, "pagination": {"page": page, "page_size": page_size, "total": total}, "meta": meta(source)}
+
+
+def _int_evidence_value(evidence: dict[str, Any], key: str) -> int | None:
+    value = evidence.get(key)
+    return value if isinstance(value, int) else None
+
+
+def _country_mismatch_audit_rows(session: Session) -> list[dict[str, Any]]:
+    """Audit stored country conflicts only; this makes no BWF request and no write."""
+    links = session.scalars(
+        select(PlayerIdentityLink)
+        .where(
+            PlayerIdentityLink.decision_status == "CONFLICTED",
+            PlayerIdentityLink.decision_class == "COUNTRY_MISMATCH",
+        )
+        .order_by(desc(PlayerIdentityLink.decided_at), PlayerIdentityLink.id)
+    ).all()
+    aliases = session.scalars(
+        select(PlayerAlias).where(PlayerAlias.id.in_({link.alias_id for link in links}))
+    ).all() if links else []
+    aliases_by_id = {alias.id: alias for alias in aliases}
+    contexts = context_summaries_for_aliases(session, list(aliases_by_id))
+    rows: list[dict[str, Any]] = []
+    for link in links:
+        alias = aliases_by_id.get(link.alias_id)
+        evidence = link.evidence if isinstance(link.evidence, dict) else {}
+        evaluation = evaluate_country_mismatch_evidence(evidence)
+        context = contexts.get(link.alias_id)
+        exact_candidate_count = _int_evidence_value(evidence, "exact_candidate_count")
+        has_profile_evidence = bool(evidence.get("official_profile_id") and evidence.get("profile_snapshot_id"))
+        disposition = evaluation.disposition
+        blocker: str | None = None
+        if alias is None:
+            disposition = "REMAIN_CONFLICTED"
+            blocker = "ALIAS_MISSING"
+        elif alias.player_id is not None:
+            disposition = "REMAIN_CONFLICTED"
+            blocker = "ALIAS_ALREADY_LINKED"
+        elif exact_candidate_count != 1:
+            disposition = "REMAIN_CONFLICTED"
+            blocker = "MULTIPLE_OR_NONUNIQUE_EXACT_CANDIDATES"
+        elif not has_profile_evidence:
+            disposition = "REMAIN_CONFLICTED"
+            blocker = "INCOMPLETE_STORED_OFFICIAL_EVIDENCE"
+        elif context is None or not context.eligible_for_profile_search:
+            disposition = "REMAIN_CONFLICTED"
+            blocker = "NOT_RECENT_SENIOR_ELIGIBLE"
+        rows.append({
+            "link_id": link.id,
+            "alias_id": link.alias_id,
+            "alias_text": alias.alias_text if alias else None,
+            "player_id": link.player_id,
+            "decision_status": link.decision_status,
+            "decision_class": link.decision_class,
+            "exact_candidate_count": exact_candidate_count,
+            "stored_official_evidence_complete": has_profile_evidence,
+            "activity_evidence": context.evidence() if context else None,
+            "recent_senior_eligible": bool(context and context.eligible_for_profile_search),
+            "proposed_disposition": disposition,
+            "blocker": blocker,
+            "country_evaluation": evaluation.as_dict(),
+            "rationale": link.rationale,
+            "evidence": evidence,
+        })
+    return rows
+
+
+def _apply_country_mismatch_resolution(session: Session, row: dict[str, Any], *, actor: str) -> bool:
+    """Create a new audited decision without mutating the original conflicted evidence."""
+    disposition = row["proposed_disposition"]
+    if disposition not in {"AUTO_EQUIVALENT_ELIGIBLE", "MANUAL_OVERRIDE_ELIGIBLE"}:
+        return False
+    alias = session.get(PlayerAlias, row["alias_id"])
+    if alias is None or alias.player_id is not None:
+        return False
+    source_link = session.get(PlayerIdentityLink, row["link_id"])
+    if source_link is None:
+        return False
+    resolver_version = (
+        COUNTRY_MISMATCH_POLICY_VERSION
+        if disposition == "AUTO_EQUIVALENT_ELIGIBLE"
+        else MANUAL_OVERRIDE_POLICY_VERSION
+    )
+    existing = session.scalar(select(PlayerIdentityLink).where(
+        PlayerIdentityLink.alias_id == alias.id,
+        PlayerIdentityLink.player_id == source_link.player_id,
+        PlayerIdentityLink.resolver_version == resolver_version,
+    ))
+    if existing:
+        return False
+    decision_status = (
+        "CONFIRMED_AUTO_EQUIVALENT"
+        if disposition == "AUTO_EQUIVALENT_ELIGIBLE"
+        else "CONFIRMED_MANUAL_OVERRIDE"
+    )
+    decision_class = (
+        "DOCUMENTED_COUNTRY_EQUIVALENCE"
+        if disposition == "AUTO_EQUIVALENT_ELIGIBLE"
+        else "USER_DIRECTED_COUNTRY_OVERRIDE"
+    )
+    evidence = {
+        **(source_link.evidence if isinstance(source_link.evidence, dict) else {}),
+        "country_mismatch_review": {
+            "source_conflicted_link_id": source_link.id,
+            "proposed_disposition": disposition,
+            "policy_version": row["country_evaluation"]["policy_version"],
+            "reason_code": row["country_evaluation"]["reason_code"],
+            "manual_override_pair": row["country_evaluation"]["manual_override_pair"],
+        },
+    }
+    resolved_link = PlayerIdentityLink(
+        alias_id=alias.id,
+        player_id=source_link.player_id,
+        profile_snapshot_id=source_link.profile_snapshot_id,
+        decision_status=decision_status,
+        decision_class=decision_class,
+        score=80 if disposition == "AUTO_EQUIVALENT_ELIGIBLE" else 60,
+        resolver_version=resolver_version,
+        evidence=evidence,
+        rationale=(
+            "Stored official country codes are a documented ISO/BWF/IOC equivalence."
+            if disposition == "AUTO_EQUIVALENT_ELIGIBLE"
+            else "User-directed country-designation override applied to stored official evidence."
+        ),
+        decided_by=actor,
+        reviewed_at=datetime.now(timezone.utc) if disposition == "MANUAL_OVERRIDE_ELIGIBLE" else None,
+        reviewed_by=actor if disposition == "MANUAL_OVERRIDE_ELIGIBLE" else None,
+    )
+    session.add(resolved_link)
+    alias.player_id = source_link.player_id
+    alias.resolution_status = "CONFIRMED"
+    for member in session.scalars(select(ParticipantMember).where(ParticipantMember.source_alias_id == alias.id)).all():
+        member.player_id = source_link.player_id
+    case = session.scalar(select(ReconciliationCase).where(
+        ReconciliationCase.case_type == "PLAYER_IDENTITY_COUNTRY_MISMATCH_RESOLUTION",
+        ReconciliationCase.candidate_entity_type == "PLAYER_ALIAS",
+        ReconciliationCase.candidate_entity_id == alias.id,
+        ReconciliationCase.status == "RESOLVED",
+    ))
+    if case is None:
+        session.add(ReconciliationCase(
+            case_type="PLAYER_IDENTITY_COUNTRY_MISMATCH_RESOLUTION",
+            status="RESOLVED",
+            candidate_entity_type="PLAYER_ALIAS",
+            candidate_entity_id=alias.id,
+            rationale=resolved_link.rationale,
+            resolved_at=datetime.now(timezone.utc),
+            resolved_by=actor,
+        ))
+    session.flush()
+    return True
 
 
 def serialize_tournament(value: Tournament) -> dict[str, Any]:
@@ -273,6 +430,8 @@ def identity_coverage(session: DbSession) -> dict[str, Any]:
             "aliases_unresolved": sum(item.player_id is None and item.resolution_status == "UNRESOLVED" for item in aliases),
             "aliases_conflicted": sum(item.resolution_status == "CONFLICTED" for item in aliases),
             "automated_links": sum(item.decision_status == "CONFIRMED_AUTO" for item in links),
+            "country_equivalent_links": sum(item.decision_status == "CONFIRMED_AUTO_EQUIVALENT" for item in links),
+            "country_manual_override_links": sum(item.decision_status == "CONFIRMED_MANUAL_OVERRIDE" for item in links),
             "provisional_links": sum(item.decision_status == "PROVISIONAL_AUTO" for item in links),
             "rejected_links": sum(item.decision_status == "REJECTED_MANUAL" for item in links),
             "aliases_no_exact_candidate": len(terminal_no_exact_alias_ids),
@@ -292,7 +451,14 @@ def identity_coverage(session: DbSession) -> dict[str, Any]:
 
 @router.get("/admin/identity/review-queue", dependencies=[Depends(require_admin)])
 def identity_review_queue(session: DbSession, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
-    query = select(PlayerIdentityLink).where(PlayerIdentityLink.decision_status.in_(("CONFLICTED", "PROVISIONAL_AUTO")))
+    query = (
+        select(PlayerIdentityLink)
+        .join(PlayerAlias, PlayerAlias.id == PlayerIdentityLink.alias_id)
+        .where(
+            PlayerIdentityLink.decision_status.in_(("CONFLICTED", "PROVISIONAL_AUTO")),
+            PlayerAlias.player_id.is_(None),
+        )
+    )
     total = len(session.scalars(query).all())
     rows = session.scalars(query.order_by(desc(PlayerIdentityLink.decided_at)).offset((page - 1) * page_size).limit(page_size)).all()
     return page_payload([
@@ -300,6 +466,57 @@ def identity_review_queue(session: DbSession, page: int = Query(1, ge=1), page_s
          "decision_class": row.decision_class, "score": row.score, "rationale": row.rationale, "evidence": row.evidence}
         for row in rows
     ], page, page_size, total, "BWF_OFFICIAL_PLAYER_PROFILES")
+
+
+@router.get("/admin/identity/country-mismatch-audit", dependencies=[Depends(require_admin)])
+def country_mismatch_audit(
+    session: DbSession,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Return all stored country mismatch dispositions without a source request or write."""
+    rows = _country_mismatch_audit_rows(session)
+    counts = {
+        disposition: sum(item["proposed_disposition"] == disposition for item in rows)
+        for disposition in ("AUTO_EQUIVALENT_ELIGIBLE", "MANUAL_OVERRIDE_ELIGIBLE", "REMAIN_CONFLICTED")
+    }
+    start = (page - 1) * page_size
+    return {
+        "data": rows[start:start + page_size],
+        "pagination": {"page": page, "page_size": page_size, "total": len(rows)},
+        "summary": {"counts": counts, "policy_version": COUNTRY_MISMATCH_POLICY_VERSION},
+        "meta": {**meta("LOCAL_STORED_IDENTITY_EVIDENCE"), "notice": "Read-only audit: no official BWF request was made and no identity link was changed."},
+    }
+
+
+@router.post("/admin/identity/country-mismatch/apply", dependencies=[Depends(require_admin)])
+def apply_country_mismatch_resolutions(
+    session: DbSession,
+    action: str = Query(..., pattern="^APPLY$"),
+) -> dict[str, Any]:
+    """Apply only pre-validated mismatch dispositions; never invokes the general queue."""
+    _ = action
+    with collection_slot("identity_country_mismatch_apply") as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail="Live polling or another identity operation is in progress; retry after it finishes.")
+        rows = _country_mismatch_audit_rows(session)
+        applied_auto_equivalent = 0
+        applied_manual_override = 0
+        for row in rows:
+            if _apply_country_mismatch_resolution(session, row, actor="ADMIN_COUNTRY_MISMATCH_POLICY"):
+                if row["proposed_disposition"] == "AUTO_EQUIVALENT_ELIGIBLE":
+                    applied_auto_equivalent += 1
+                else:
+                    applied_manual_override += 1
+        session.commit()
+    return {
+        "data": {
+            "applied_auto_equivalent": applied_auto_equivalent,
+            "applied_manual_override": applied_manual_override,
+            "skipped": len(rows) - applied_auto_equivalent - applied_manual_override,
+        },
+        "meta": {**meta("LOCAL_STORED_IDENTITY_EVIDENCE"), "notice": "No official BWF request was made. Original conflicted link evidence was retained and new decisions are auditable."},
+    }
 
 
 @router.post("/admin/identity/run", dependencies=[Depends(require_admin)])
