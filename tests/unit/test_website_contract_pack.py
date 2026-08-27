@@ -149,6 +149,37 @@ def test_tournament_simulation_contract_requires_a_canonical_calendar_link_and_p
     assert snapshot is None
 
 
+def test_public_match_route_accepts_typed_date_filters_without_database_errors() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory.begin() as session:
+        tournament = Tournament(name="Approved", source_name_raw="Approved", source_category_raw="BWF World Tour Super 500", status="ACTIVE")
+        session.add(tournament)
+        session.flush()
+        event = Event(tournament_id=tournament.id, event_type="MS", category="BWF World Tour Super 500")
+        session.add(event)
+        session.flush()
+        session.add(Match(source_match_key="test:filtered-date", match_date=date(2026, 8, 24), tournament_id=tournament.id, event_id=event.id, status="COMPLETED", completion_basis="BWF_OFFICIAL_RESPONSE"))
+
+    def override_db():
+        session = factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        response = TestClient(app).get("/api/v1/website/matches?scope=completed&from_date=2026-08-01&to_date=2026-08-31")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["pagination"]["total"] == 1
+    assert response.json()["data"][0]["id"]
+
+
 def test_public_contract_routes_return_read_only_metadata_and_explicitly_withheld_future_capabilities() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)

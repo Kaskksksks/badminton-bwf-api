@@ -243,8 +243,8 @@ def list_website_matches(
     scope: Literal["all", "live", "scheduled", "completed"],
     tournament_id: str | None,
     event_id: str | None,
-    from_date: str | None,
-    to_date: str | None,
+    from_date: date | None,
+    to_date: date | None,
     page: int,
     page_size: int,
 ) -> WebsiteMatchListResponse:
@@ -282,8 +282,8 @@ def list_matches(
     scope: Literal["all", "live", "scheduled", "completed"] = Query("all"),
     tournament_id: str | None = None,
     event_id: str | None = None,
-    from_date: str | None = None,
-    to_date: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
 ) -> WebsiteMatchListResponse:
