@@ -22,6 +22,7 @@ class SourceKind(str, Enum):
     HISTORICAL_SEED = "HISTORICAL_SEED"
     BWF_LIVE = "BWF_LIVE"
     BWF_RANKINGS = "BWF_RANKINGS"
+    BWF_CORPORATE_CALENDAR = "BWF_CORPORATE_CALENDAR"
     MANUAL = "MANUAL"
 
 
@@ -370,6 +371,76 @@ class TournamentClassification(UUIDMixin, TimestampMixin, Base):
     valid_from: Mapped[date | None] = mapped_column(Date)
     valid_to: Mapped[date | None] = mapped_column(Date)
     evidence_record_id: Mapped[str | None] = mapped_column(ForeignKey("staged_import_records.id"))
+
+
+class OfficialTournamentCalendarSnapshot(UUIDMixin, TimestampMixin, Base):
+    """Immutable observation of the user-authorised BWF Corporate calendar."""
+
+    __tablename__ = "official_tournament_calendar_snapshots"
+    __table_args__ = (
+        UniqueConstraint("source_id", "content_hash", name="official_calendar_snapshots_source_hash"),
+        Index("ix_official_calendar_snapshots_retrieved", "source_id", "retrieved_at"),
+    )
+
+    source_id: Mapped[str] = mapped_column(ForeignKey("data_sources.id"), nullable=False, index=True)
+    source_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    content_type: Mapped[str | None] = mapped_column(String(255))
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_status: Mapped[str] = mapped_column(String(32), nullable=False, default="CAPTURED")
+    entry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    issue_summary: Mapped[str | None] = mapped_column(Text)
+
+
+class OfficialTournamentCalendarEntry(UUIDMixin, TimestampMixin, Base):
+    """A calendar entry parsed from one immutable official calendar snapshot."""
+
+    __tablename__ = "official_tournament_calendar_entries"
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "source_tournament_id", name="official_calendar_entries_snapshot_source"),
+        Index("ix_official_calendar_entries_dates", "start_date", "end_date"),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("official_tournament_calendar_snapshots.id"), nullable=False, index=True
+    )
+    source_tournament_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(512), nullable=False)
+    country_code: Mapped[str | None] = mapped_column(String(8))
+    start_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    category: Mapped[str | None] = mapped_column(String(255))
+    city: Mapped[str | None] = mapped_column(String(255))
+    source_url: Mapped[str | None] = mapped_column(String(2048))
+    draw_date_text: Mapped[str | None] = mapped_column(String(255))
+    eligibility_status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    eligibility_rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class OfficialTournamentDocument(UUIDMixin, TimestampMixin, Base):
+    """Versioned metadata for a direct calendar-derived official BWF draw PDF."""
+
+    __tablename__ = "official_tournament_documents"
+    __table_args__ = (
+        UniqueConstraint("calendar_entry_id", "content_hash", name="official_tournament_documents_entry_hash"),
+        Index("ix_official_tournament_documents_entry_retrieved", "calendar_entry_id", "retrieved_at"),
+    )
+
+    calendar_entry_id: Mapped[str] = mapped_column(
+        ForeignKey("official_tournament_calendar_entries.id"), nullable=False, index=True
+    )
+    source_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    document_label: Mapped[str] = mapped_column(String(1024), nullable=False)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    content_type: Mapped[str | None] = mapped_column(String(255))
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    parser_status: Mapped[str] = mapped_column(String(32), nullable=False, default="CAPTURED_REVIEW_REQUIRED")
+    parser_issue: Mapped[str | None] = mapped_column(Text)
 
 
 class Event(UUIDMixin, TimestampMixin, Base):

@@ -85,6 +85,30 @@ class Settings(BaseSettings):
     bwf_player_profiles_auto_confirm: bool = False
     bwf_player_profiles_dry_run: bool = True
 
+    # Corporate calendar and direct draw PDFs are a separate authorised source.
+    # They remain disabled until a deployment has an explicit permission reference
+    # and a separately approved controlled dry run.
+    bwf_calendar_enabled: bool = False
+    bwf_calendar_scheduler_enabled: bool = False
+    bwf_calendar_permission_required: bool = True
+    bwf_calendar_permission_reference: str | None = None
+    bwf_calendar_request_timeout_seconds: int = Field(default=30, ge=1, le=120)
+    bwf_calendar_user_agent: str = "BadmintonDataPlatform/0.1 (authorised BWF Corporate calendar collection)"
+    bwf_calendar_refresh_hours: int = Field(default=12, ge=6, le=24)
+    bwf_calendar_max_bytes: int = Field(default=4_000_000, ge=100_000, le=10_000_000)
+    bwf_draw_document_max_bytes: int = Field(default=10_000_000, ge=100_000, le=25_000_000)
+    bwf_draw_document_horizon_days: int = Field(default=14, ge=0, le=60)
+    bwf_draw_document_max_per_run: int = Field(default=4, ge=0, le=20)
+    bwf_calendar_source_revision: str = "bwf-corporate-calendar-v1"
+
+    @field_validator("bwf_calendar_permission_reference")
+    @classmethod
+    def require_calendar_permission_reference(cls, value: str | None, info: object) -> str | None:
+        data = getattr(info, "data", {})
+        if data.get("bwf_calendar_enabled") and data.get("bwf_calendar_permission_required") and not value:
+            raise ValueError("BWF_CALENDAR_PERMISSION_REFERENCE is required when BWF_CALENDAR_ENABLED=true")
+        return value
+
     @field_validator("bwf_player_profiles_permission_reference")
     @classmethod
     def require_player_profile_permission_reference(cls, value: str | None, info: object) -> str | None:

@@ -24,6 +24,9 @@ LATER_REVISION_TABLES = {
     "ranking_entries",
     "player_profile_snapshots",
     "player_identity_links",
+    "official_tournament_calendar_snapshots",
+    "official_tournament_calendar_entries",
+    "official_tournament_documents",
 }
 
 
