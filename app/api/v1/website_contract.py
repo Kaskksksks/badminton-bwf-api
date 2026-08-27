@@ -287,3 +287,35 @@ class OfficialBracketResponse(ContractModel):
 class ModelContractResponse(ContractModel):
     data: dict[str, ContractAvailability]
     meta: ApiMeta
+
+
+class ForecastFieldAvailability(ContractModel):
+    """A single forecast display field; never contains a locally inferred value."""
+
+    available: bool
+    reason: str
+
+
+class WebsiteMatchForecastSnapshot(ContractModel):
+    match_id: str
+    model_key: str
+    model_version: str
+    input_cutoff: datetime
+    generated_at: datetime
+    participant_1_win_probability_bps: int = Field(ge=0, le=10_000)
+    participant_2_win_probability_bps: int = Field(ge=0, le=10_000)
+    confidence_label: str
+    uncertainty_summary: str
+    evidence_contributors: list[str]
+    provenance: dict[str, object]
+
+
+class WebsiteMatchForecastResponse(ContractModel):
+    match_id: str
+    availability: ContractAvailability
+    win_probability: ForecastFieldAvailability
+    confidence: ForecastFieldAvailability
+    evidence_contributors: ForecastFieldAvailability
+    uncertainty: ForecastFieldAvailability
+    snapshot: WebsiteMatchForecastSnapshot | None = None
+    meta: ApiMeta

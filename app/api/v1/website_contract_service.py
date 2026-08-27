@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.website_contract import (
     CalendarProvenance,
     ContractAvailability,
+    WebsiteMatchForecastSnapshot,
     OfficialBracketNode,
     SeniorParticipantContract,
     WebsiteCalendarEntry,
@@ -209,6 +210,50 @@ def model_contract(session: Session) -> dict[str, ContractAvailability]:
         "head_to_head": ContractAvailability(available=bool(h2h_count), reason="validated_head_to_head_available" if h2h_count else "no_validated_head_to_head_snapshot", prerequisites=prerequisites + ["pair of confirmed active participants", "eligible completed match history"], eligible_record_count=h2h_count),
         "simulations": ContractAvailability(available=bool(models_ready and simulation_count), reason="published_tournament_simulation_available" if models_ready and simulation_count else "no_published_tournament_simulation_snapshot", prerequisites=prerequisites + ["published official draw topology", "validated reconciliation to canonical matches", "active evaluated model"], eligible_record_count=simulation_count),
     }
+
+
+def match_forecast_snapshot(session: Session, match_id: str) -> tuple[ContractAvailability, WebsiteMatchForecastSnapshot | None]:
+    """Expose a published pre-match forecast only when it is both senior-safe and model-validated."""
+    match = session.get(Match, match_id)
+    prerequisites = [
+        "approved senior-only source scope",
+        "confirmed participant identity",
+        "timestamped input cutoff",
+        "active evaluated model",
+        "published pre-match forecast",
+        "probabilities summing to 10,000 basis points",
+    ]
+    if match is None or not match.tournament_id or match.tournament_id not in approved_tournament_ids(session, {match.tournament_id}):
+        return ContractAvailability(available=False, reason="eligible_match_not_found", prerequisites=prerequisites, eligible_record_count=0), None
+    row = session.execute(
+        select(MatchForecastSnapshot, ModelSnapshot)
+        .join(ModelSnapshot, ModelSnapshot.id == MatchForecastSnapshot.model_snapshot_id)
+        .where(
+            MatchForecastSnapshot.match_id == match_id,
+            MatchForecastSnapshot.forecast_status == "PUBLISHED",
+            ModelSnapshot.model_status == "ACTIVE",
+            ModelSnapshot.calibration_status == "EVALUATED",
+        )
+        .order_by(MatchForecastSnapshot.input_cutoff.desc(), MatchForecastSnapshot.generated_at.desc())
+    ).first()
+    if row is None:
+        return ContractAvailability(available=False, reason="no_published_pre_match_forecast_snapshot", prerequisites=prerequisites, eligible_record_count=0), None
+    forecast, model = row
+    if forecast.participant_1_win_probability_bps + forecast.participant_2_win_probability_bps != 10_000:
+        return ContractAvailability(available=False, reason="forecast_probability_total_invalid", prerequisites=prerequisites, eligible_record_count=0), None
+    return ContractAvailability(available=True, reason="published_pre_match_forecast_snapshot", prerequisites=prerequisites, eligible_record_count=1), WebsiteMatchForecastSnapshot(
+        match_id=match_id,
+        model_key=model.model_key,
+        model_version=model.model_version,
+        input_cutoff=forecast.input_cutoff,
+        generated_at=forecast.generated_at,
+        participant_1_win_probability_bps=forecast.participant_1_win_probability_bps,
+        participant_2_win_probability_bps=forecast.participant_2_win_probability_bps,
+        confidence_label=forecast.confidence_label,
+        uncertainty_summary=forecast.uncertainty_summary,
+        evidence_contributors=[str(value) for value in forecast.evidence_contributors],
+        provenance=forecast.provenance,
+    )
 
 
 def official_bracket(session: Session, *, calendar_entry_id: str, discipline: str) -> tuple[ContractAvailability, str | None, str | None, list[OfficialBracketNode]]:

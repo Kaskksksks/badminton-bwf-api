@@ -164,6 +164,7 @@ def test_public_contract_routes_return_read_only_metadata_and_explicitly_withhel
         brackets = client.get(f"/api/v1/website/calendar/{entry_id}/brackets/MS")
         participants = client.get("/api/v1/website/active-participants")
         readiness = client.get("/api/v1/website/model-contract")
+        forecast = client.get("/api/v1/website/matches/not-a-match/forecast")
     finally:
         app.dependency_overrides.clear()
 
@@ -179,6 +180,10 @@ def test_public_contract_routes_return_read_only_metadata_and_explicitly_withhel
     assert participants.json()["data"] == []
     assert readiness.status_code == 200
     assert readiness.json()["data"]["predictions"]["available"] is False
+    assert forecast.status_code == 200
+    assert forecast.json()["availability"]["available"] is False
+    assert forecast.json()["win_probability"]["reason"] == "eligible_match_not_found"
+    assert forecast.json()["uncertainty"]["reason"] == "eligible_match_not_found"
 
 
 def test_website_tournament_delivery_excludes_unrecognised_and_prohibited_senior_categories() -> None:

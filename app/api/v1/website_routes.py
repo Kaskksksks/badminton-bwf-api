@@ -48,8 +48,10 @@ from app.api.v1.website_contract import (
     SeniorParticipantListResponse,
     WebsiteCalendarListResponse,
     WebsiteDrawDocumentListResponse,
+    ForecastFieldAvailability,
+    WebsiteMatchForecastResponse,
 )
-from app.api.v1.website_contract_service import active_senior_participants, approved_tournament_ids, calendar_entries, draw_documents, model_contract, official_bracket
+from app.api.v1.website_contract_service import active_senior_participants, approved_tournament_ids, calendar_entries, draw_documents, match_forecast_snapshot, model_contract, official_bracket
 
 router = APIRouter(prefix="/website", tags=["website-integration"])
 DbSession = Session
@@ -295,6 +297,23 @@ def get_match(match_id: str, session: Session = Depends(get_db)) -> WebsiteMatch
     context = fetch_context(session, [value])
     source = "BWF_LIVE" if value.status == "LIVE" else "PLATFORM"
     return WebsiteMatchResponse(data=make_match(value, *context), meta=metadata(source))
+
+
+@router.get("/matches/{match_id}/forecast", response_model=WebsiteMatchForecastResponse)
+def get_match_forecast(match_id: str, session: Session = Depends(get_db)) -> WebsiteMatchForecastResponse:
+    """Return immutable published forecast fields or explicit field-level withholding reasons."""
+    availability, snapshot = match_forecast_snapshot(session, match_id)
+    common = {"available": availability.available, "reason": availability.reason}
+    return WebsiteMatchForecastResponse(
+        match_id=match_id,
+        availability=availability,
+        win_probability=ForecastFieldAvailability(**common),
+        confidence=ForecastFieldAvailability(**common),
+        evidence_contributors=ForecastFieldAvailability(**common),
+        uncertainty=ForecastFieldAvailability(**common),
+        snapshot=snapshot,
+        meta=metadata(),
+    )
 
 
 @router.get("/tournaments", response_model=WebsiteTournamentListResponse)
