@@ -101,3 +101,17 @@ def test_unapproved_or_incomplete_country_pairs_remain_conflicted(
 )
 def test_canonicalisation_never_guesses_special_or_subnational_codes(raw: str, expected: str | None) -> None:
     assert canonical_iso3(raw) == expected
+
+
+def test_legacy_official_country_code_is_treated_as_stored_profile_evidence() -> None:
+    result = evaluate_country_mismatch_evidence(
+        {
+            "search_country_code": "TPE",
+            "official_country_code": "TWN",
+        }
+    )
+
+    assert result.disposition == "AUTO_EQUIVALENT_ELIGIBLE"
+    assert result.canonical_search_country == "TWN"
+    assert result.canonical_profile_country == "TWN"
+    assert result.policy_version == COUNTRY_MISMATCH_POLICY_VERSION

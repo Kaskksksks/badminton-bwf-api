@@ -216,3 +216,29 @@ def test_protected_route_functions_report_and_apply_without_network(session: Ses
         "skipped": 0,
     }
     assert applied["meta"]["source"] == "LOCAL_STORED_IDENTITY_EVIDENCE"
+
+
+def test_audit_recognises_legacy_profile_country_code_as_equivalent(session: Session) -> None:
+    _, link = add_conflicted_link(session, key="legacy-equivalent", search_code="MAS", profile_code="MYS")
+    link.evidence = {
+        key: value
+        for key, value in link.evidence.items()
+        if key != "official_profile_bwf_nationality_code"
+    }
+    link.evidence["official_country_code"] = "MYS"
+    session.flush()
+
+    rows = _country_mismatch_audit_rows(session)
+
+    assert len(rows) == 1
+    assert rows[0]["proposed_disposition"] == "AUTO_EQUIVALENT_ELIGIBLE"
+    assert rows[0]["country_evaluation"]["canonical_search_country"] == "MYS"
+
+
+def test_audit_omits_an_alias_already_linked_to_a_confirmed_player(session: Session) -> None:
+    alias, link = add_conflicted_link(session, key="already-linked", search_code="TPE", profile_code="TWN")
+    alias.player_id = link.player_id
+    alias.resolution_status = "CONFIRMED"
+    session.flush()
+
+    assert _country_mismatch_audit_rows(session) == []

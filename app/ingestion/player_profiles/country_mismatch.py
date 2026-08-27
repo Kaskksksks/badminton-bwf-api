@@ -137,7 +137,13 @@ def evaluate_country_mismatch_evidence(evidence: Mapping[str, object]) -> Countr
     """
 
     search_code = normalize_country_code(evidence.get("search_country_code"))
-    profile_code = normalize_country_code(evidence.get("official_profile_bwf_nationality_code"))
+    # Earlier resolver versions stored the official profile country as
+    # ``official_country_code``. Prefer the newer nationality key, while
+    # accepting the legacy key as the same stored official evidence.
+    profile_code = normalize_country_code(
+        evidence.get("official_profile_bwf_nationality_code")
+        or evidence.get("official_country_code")
+    )
     canonical_search = canonical_iso3(search_code)
     canonical_profile = canonical_iso3(profile_code)
     override_pair = _manual_pair(search_code, profile_code)

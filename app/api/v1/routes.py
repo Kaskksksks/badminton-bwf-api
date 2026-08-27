@@ -68,9 +68,11 @@ def _country_mismatch_audit_rows(session: Session) -> list[dict[str, Any]]:
     """Audit stored country conflicts only; this makes no BWF request and no write."""
     links = session.scalars(
         select(PlayerIdentityLink)
+        .join(PlayerAlias, PlayerAlias.id == PlayerIdentityLink.alias_id)
         .where(
             PlayerIdentityLink.decision_status == "CONFLICTED",
             PlayerIdentityLink.decision_class == "COUNTRY_MISMATCH",
+            PlayerAlias.player_id.is_(None),
         )
         .order_by(desc(PlayerIdentityLink.decided_at), PlayerIdentityLink.id)
     ).all()
