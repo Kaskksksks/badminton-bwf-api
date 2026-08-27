@@ -32,6 +32,7 @@ from app.ingestion.adapters.bwf.eligibility import (
     is_paralympic_match,
     is_paralympic_tournament,
 )
+from app.ingestion.approved_scope import classify_approved_senior_scope
 from app.snapshots.service import record_game_state
 
 PARSER_VERSION = "bwf-match-centre-v1"
@@ -139,6 +140,7 @@ def upsert_tournament(session: Session, source: DataSource, payload: dict[str, A
         assign_identifier(session, source.id, "TOURNAMENT", tournament.id, "BWF_TOURNAMENT_ID", source_id, raw.id)
     tournament.name = str(payload.get("name") or tournament.name)
     tournament.source_name_raw = str(payload.get("name") or tournament.source_name_raw or tournament.name)
+    tournament.source_category_raw = str(payload.get("category") or payload.get("classification") or tournament.source_category_raw or "") or None
     tournament.location_raw = str(payload.get("venue_name") or payload.get("venue_address1") or tournament.location_raw or "") or None
     tournament.source_url = payload.get("tmtLink") or tournament.source_url
     start_date = payload.get("start_date")
@@ -310,15 +312,21 @@ def synchronize_current_bwf(session: Session, client: BWFClient | None = None, s
     skipped_paralympic_match_count = 0
     skipped_junior_tournament_count = 0
     skipped_junior_match_count = 0
+    skipped_non_target_senior_tournament_count = 0
+    skipped_non_target_senior_match_count = 0
     tournaments = tournaments_response.payload.get("results") or []
     for tournament_payload in tournaments:
         if not isinstance(tournament_payload, dict) or tournament_payload.get("id") is None:
             continue
-        if is_paralympic_tournament(tournament_payload):
+        scope_status, _ = classify_approved_senior_scope(tournament_payload)
+        if scope_status == "EXCLUDED_PARA":
             skipped_paralympic_tournament_count += 1
             continue
-        if is_junior_tournament(tournament_payload):
+        if scope_status == "EXCLUDED_JUNIOR":
             skipped_junior_tournament_count += 1
+            continue
+        if scope_status != "ELIGIBLE":
+            skipped_non_target_senior_tournament_count += 1
             continue
         eligible_tournament_count += 1
         tournament = upsert_tournament(session, source, tournament_payload, tournament_raw)
@@ -327,11 +335,15 @@ def synchronize_current_bwf(session: Session, client: BWFClient | None = None, s
         for envelope in live_response.payload.get("results") or []:
             if not isinstance(envelope, dict):
                 continue
-            if is_paralympic_match(envelope):
+            match_scope_status, _ = classify_approved_senior_scope(tournament_payload, envelope)
+            if match_scope_status == "EXCLUDED_PARA":
                 skipped_paralympic_match_count += 1
                 continue
-            if is_junior_match(envelope):
+            if match_scope_status == "EXCLUDED_JUNIOR":
                 skipped_junior_match_count += 1
+                continue
+            if match_scope_status != "ELIGIBLE":
+                skipped_non_target_senior_match_count += 1
                 continue
             upsert_live_match(session, source, tournament, envelope, live_raw)
             live_match_count += 1
@@ -345,4 +357,6 @@ def synchronize_current_bwf(session: Session, client: BWFClient | None = None, s
         "skipped_paralympic_matches": skipped_paralympic_match_count,
         "skipped_junior_tournaments": skipped_junior_tournament_count,
         "skipped_junior_matches": skipped_junior_match_count,
+        "skipped_non_target_senior_tournaments": skipped_non_target_senior_tournament_count,
+        "skipped_non_target_senior_matches": skipped_non_target_senior_match_count,
     }

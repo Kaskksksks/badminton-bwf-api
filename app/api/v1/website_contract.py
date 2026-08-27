@@ -184,3 +184,106 @@ class WebsiteRankingListResponse(ContractModel):
 class CapabilityResponse(ContractModel):
     data: dict[str, object]
     meta: ApiMeta
+
+
+class CalendarProvenance(ContractModel):
+    source_code: Literal["BWF_CORPORATE_CALENDAR"]
+    snapshot_id: str
+    source_url: str
+    retrieved_at: datetime
+    content_hash: str
+    parser_version: str
+    snapshot_status: str
+
+
+class WebsiteCalendarEntry(ContractModel):
+    id: str
+    source_tournament_id: str
+    name: str
+    country_code: str | None = None
+    city: str | None = None
+    start_date: str
+    end_date: str
+    category: str | None = None
+    event_url: str | None = None
+    draw_date_text: str | None = None
+    eligibility_status: Literal["ELIGIBLE"]
+    eligibility_rationale: str
+    provenance: CalendarProvenance
+
+
+class WebsiteCalendarListResponse(ContractModel):
+    data: list[WebsiteCalendarEntry]
+    pagination: PageInfo
+    meta: ApiMeta
+
+
+class WebsiteDrawDocument(ContractModel):
+    id: str
+    calendar_entry_id: str
+    source_url: str
+    document_label: str
+    retrieved_at: datetime
+    content_hash: str
+    content_type: str | None = None
+    byte_size: int = Field(ge=0)
+    parser_version: str
+    parser_status: str
+    parser_issue: str | None = None
+
+
+class WebsiteDrawDocumentListResponse(ContractModel):
+    data: list[WebsiteDrawDocument]
+    meta: ApiMeta
+
+
+class SeniorParticipantContract(ContractModel):
+    id: str
+    kind: Literal["player", "pair"]
+    display_name: str
+    member_ids: list[str] = Field(min_length=1, max_length=2)
+    identity_status: Literal["CONFIRMED"]
+    activity_status: Literal["ACTIVE_RECENT_OFFICIAL_PARTICIPATION"]
+    recent_eligible_match_count: int = Field(ge=1)
+    latest_eligible_match_date: str
+    eligibility_rationale: str
+
+
+class SeniorParticipantListResponse(ContractModel):
+    data: list[SeniorParticipantContract]
+    pagination: PageInfo
+    meta: ApiMeta
+
+
+class ContractAvailability(ContractModel):
+    available: bool
+    reason: str
+    prerequisites: list[str]
+    eligible_record_count: int = Field(ge=0)
+
+
+class OfficialBracketNode(ContractModel):
+    source_node_key: str
+    round_label: str | None = None
+    display_order: int = Field(ge=0)
+    participant_1_label: str | None = None
+    participant_2_label: str | None = None
+    winner_label: str | None = None
+    score_text: str | None = None
+    reconciliation_status: str
+    canonical_match_id: str | None = None
+
+
+class OfficialBracketResponse(ContractModel):
+    availability: ContractAvailability
+    discipline: Literal["MS", "WS", "MD", "WD", "XD"]
+    calendar_entry_id: str
+    document_id: str | None = None
+    topology_id: str | None = None
+    data: list[OfficialBracketNode] = Field(default_factory=list)
+    meta: ApiMeta
+
+
+class ModelContractResponse(ContractModel):
+    data: dict[str, ContractAvailability]
+    meta: ApiMeta

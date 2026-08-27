@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -43,7 +43,13 @@ from app.api.v1.website_contract import (
     WebsiteRankingListResponse,
     RankingSnapshotMeta,
     WebsiteTournamentListResponse,
+    ModelContractResponse,
+    OfficialBracketResponse,
+    SeniorParticipantListResponse,
+    WebsiteCalendarListResponse,
+    WebsiteDrawDocumentListResponse,
 )
+from app.api.v1.website_contract_service import active_senior_participants, approved_tournament_ids, calendar_entries, draw_documents, model_contract, official_bracket
 
 router = APIRouter(prefix="/website", tags=["website-integration"])
 DbSession = Session
@@ -254,8 +260,11 @@ def list_website_matches(
         query = query.where(Match.match_date >= from_date)
     if to_date:
         query = query.where(Match.match_date <= to_date)
-    total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
-    values = session.scalars(query.order_by(Match.match_date.desc(), Match.actual_start_time.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    candidates = session.scalars(query.order_by(Match.match_date.desc(), Match.actual_start_time.desc())).all()
+    allowed_ids = approved_tournament_ids(session, {value.tournament_id for value in candidates if value.tournament_id})
+    eligible = [value for value in candidates if value.tournament_id in allowed_ids]
+    total = len(eligible)
+    values = eligible[(page - 1) * page_size : page * page_size]
     context = fetch_context(session, values)
     return WebsiteMatchListResponse(
         data=[make_match(value, *context) for value in values],
@@ -281,7 +290,7 @@ def list_matches(
 @router.get("/matches/{match_id}", response_model=WebsiteMatchResponse)
 def get_match(match_id: str, session: Session = Depends(get_db)) -> WebsiteMatchResponse:
     value = session.get(Match, match_id)
-    if not value:
+    if not value or not value.tournament_id or value.tournament_id not in approved_tournament_ids(session, {value.tournament_id}):
         raise HTTPException(status_code=404, detail="Match not found")
     context = fetch_context(session, [value])
     source = "BWF_LIVE" if value.status == "LIVE" else "PLATFORM"
@@ -294,8 +303,11 @@ def list_tournaments(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
 ) -> WebsiteTournamentListResponse:
-    total = session.scalar(select(func.count()).select_from(Tournament)) or 0
-    values = session.scalars(select(Tournament).order_by(Tournament.end_date.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    candidates = session.scalars(select(Tournament).order_by(Tournament.end_date.desc())).all()
+    allowed_ids = approved_tournament_ids(session, {item.id for item in candidates})
+    eligible = [item for item in candidates if item.id in allowed_ids]
+    total = len(eligible)
+    values = eligible[(page - 1) * page_size : page * page_size]
     tournament_ids = [item.id for item in values]
     classifications = session.scalars(select(TournamentClassification).where(TournamentClassification.tournament_id.in_(tournament_ids))).all() if tournament_ids else []
     events = session.scalars(select(Event).where(Event.tournament_id.in_(tournament_ids))).all() if tournament_ids else []
@@ -312,9 +324,63 @@ def list_tournaments(
     return WebsiteTournamentListResponse(data=data, pagination=PageInfo(page=page, page_size=page_size, total=total), meta=metadata())
 
 
+@router.get("/calendar", response_model=WebsiteCalendarListResponse)
+def list_calendar_metadata(
+    session: Session = Depends(get_db),
+    from_date: date | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+) -> WebsiteCalendarListResponse:
+    """Read only stored metadata from the authorised corporate calendar; no source request occurs."""
+    data, total = calendar_entries(session, page=page, page_size=page_size, from_date=from_date)
+    return WebsiteCalendarListResponse(data=data, pagination=PageInfo(page=page, page_size=page_size, total=total), meta=metadata("BWF_CORPORATE_CALENDAR"))
+
+
+@router.get("/calendar/{calendar_entry_id}/draw-documents", response_model=WebsiteDrawDocumentListResponse)
+def list_draw_document_metadata(calendar_entry_id: str, session: Session = Depends(get_db)) -> WebsiteDrawDocumentListResponse:
+    """Read only document metadata; this endpoint never returns PDF bytes or triggers collection."""
+    return WebsiteDrawDocumentListResponse(data=draw_documents(session, calendar_entry_id), meta=metadata("BWF_CORPORATE_CALENDAR"))
+
+
+@router.get("/active-participants", response_model=SeniorParticipantListResponse)
+def list_active_participants(
+    session: Session = Depends(get_db),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+) -> SeniorParticipantListResponse:
+    """Return only confirmed player or pair identities with recent approved senior official activity."""
+    data, total = active_senior_participants(session, page=page, page_size=page_size)
+    return SeniorParticipantListResponse(data=data, pagination=PageInfo(page=page, page_size=page_size, total=total), meta=metadata("BWF_LIVE_AND_RESOLVED_IDENTITIES"))
+
+
+@router.get("/calendar/{calendar_entry_id}/brackets/{discipline}", response_model=OfficialBracketResponse)
+def get_official_bracket(
+    calendar_entry_id: str,
+    discipline: Literal["MS", "WS", "MD", "WD", "XD"],
+    session: Session = Depends(get_db),
+) -> OfficialBracketResponse:
+    """Return a bracket only after direct-PDF parser validation and canonical reconciliation."""
+    availability, document_id, topology_id, data = official_bracket(session, calendar_entry_id=calendar_entry_id, discipline=discipline)
+    return OfficialBracketResponse(
+        availability=availability,
+        discipline=discipline,
+        calendar_entry_id=calendar_entry_id,
+        document_id=document_id,
+        topology_id=topology_id,
+        data=data,
+        meta=metadata("BWF_CORPORATE_CALENDAR"),
+    )
+
+
+@router.get("/model-contract", response_model=ModelContractResponse)
+def get_model_contract(session: Session = Depends(get_db)) -> ModelContractResponse:
+    """Expose model readiness without claiming forecasts, head-to-head, or simulations before evidence exists."""
+    return ModelContractResponse(data=model_contract(session), meta=metadata())
+
+
 @router.get("/tournaments/{tournament_id}/events", response_model=WebsiteEventListResponse)
 def list_tournament_events(tournament_id: str, session: Session = Depends(get_db)) -> WebsiteEventListResponse:
-    if not session.get(Tournament, tournament_id):
+    if not session.get(Tournament, tournament_id) or tournament_id not in approved_tournament_ids(session, {tournament_id}):
         raise HTTPException(status_code=404, detail="Tournament not found")
     values = session.scalars(select(Event).where(Event.tournament_id == tournament_id).order_by(Event.event_type)).all()
     return WebsiteEventListResponse(data=[normalize_event(value) for value in values], meta=metadata())
@@ -326,9 +392,9 @@ def list_players(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
 ) -> WebsitePlayerListResponse:
-    query = select(Player).where(Player.identity_status == "CONFIRMED")
-    total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
-    values = session.scalars(query.order_by(Player.full_name).offset((page - 1) * page_size).limit(page_size)).all()
+    active, total = active_senior_participants(session, page=page, page_size=page_size)
+    player_ids = {member_id for participant in active if participant.kind == "player" for member_id in participant.member_ids}
+    values = session.scalars(select(Player).where(Player.id.in_(player_ids)).order_by(Player.full_name)).all() if player_ids else []
     data = [WebsitePlayer(id=value.id, full_name=value.full_name, country_code=value.country_code, profile_url=value.profile_url, identity_status=value.identity_status) for value in values]
     return WebsitePlayerListResponse(data=data, pagination=PageInfo(page=page, page_size=page_size, total=total), meta=metadata("BWF_LIVE_AND_RESOLVED_IDENTITIES"))
 
@@ -336,7 +402,7 @@ def list_players(
 @router.get("/rankings", response_model=WebsiteRankingListResponse)
 def list_rankings(
     session: Session = Depends(get_db),
-    ranking_system: Literal["WORLD", "WORLD_TOUR", "WORLD_JUNIOR"] = Query("WORLD"),
+    ranking_system: Literal["WORLD", "WORLD_TOUR"] = Query("WORLD"),
     discipline: Literal["MS", "WS", "MD", "WD", "XD"] = Query("MS"),
     effective_date: str | None = None,
     page: int = Query(1, ge=1),
@@ -345,6 +411,7 @@ def list_rankings(
     query = select(RankingSnapshot).where(
         RankingSnapshot.ranking_system == ranking_system,
         RankingSnapshot.discipline == discipline,
+        RankingSnapshot.population == "SENIOR",
         RankingSnapshot.snapshot_status == "COMPLETE",
     )
     if effective_date:
@@ -400,12 +467,15 @@ def list_rankings(
 @router.get("/capabilities", response_model=CapabilityResponse)
 def capabilities(session: Session = Depends(get_db)) -> CapabilityResponse:
     rankings_available = bool(session.scalar(select(func.count()).select_from(RankingSnapshot)))
+    contracts = model_contract(session)
     return CapabilityResponse(
         data={
             "rankings": ({"available": True, "source": "BWF_OFFICIAL_RANKINGS"} if rankings_available else {"available": False, "reason": "not_yet_ingested"}),
-            "draws": {"available": False, "reason": "not_exposed_by_provider"},
+            "draws": {"available": False, "reason": "official_draw_topology_not_yet_validated_and_reconciled"},
             "point_events": {"available": False, "reason": "not_exposed_by_provider"},
-            "predictions": {"available": False, "reason": "no_validated_model_contract"},
+            "predictions": contracts["predictions"].model_dump(),
+            "head_to_head": contracts["head_to_head"].model_dump(),
+            "tournament_simulations": contracts["simulations"].model_dump(),
             "live_states": {"available": True, "caveat": "partial scores and collection timestamps are possible"},
         },
         meta=metadata(),

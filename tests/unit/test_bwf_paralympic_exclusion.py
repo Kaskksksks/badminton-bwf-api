@@ -52,7 +52,7 @@ class FakeBWFClient:
                 "results": [
                     {"id": 10, "name": "Para Badminton International"},
                     {"id": 20, "name": "European Junior Championships"},
-                    {"id": 30, "name": "Continental Senior Championships"},
+                    {"id": 30, "name": "European Badminton Championships", "category": "Continental Individual Championships"},
                 ]
             },
         )
@@ -76,7 +76,7 @@ def test_paralympic_markers_are_limited_to_competition_metadata() -> None:
     assert is_paralympic_tournament({"name": "Para Badminton International"}) is True
     assert is_paralympic_tournament({"name": "Para International"}) is True
     assert is_paralympic_tournament({"name": "2026 European Junior Championships"}) is False
-    assert is_paralympic_tournament({"name": "Senior Continental Championships"}) is False
+    assert is_paralympic_tournament({"name": "Continental Individual Championships"}) is False
     assert is_paralympic_match({"live_detail": {"event": "WH1"}}) is True
     assert is_paralympic_match({"live_detail": {"event": "WD-U19"}}) is False
     assert is_paralympic_match({"live_detail": {"event": "MS"}}) is False
@@ -105,7 +105,9 @@ def test_live_ingestion_excludes_para_and_junior_boundaries_but_keeps_senior() -
         "skipped_paralympic_matches": 1,
         "skipped_junior_tournaments": 1,
         "skipped_junior_matches": 1,
+        "skipped_non_target_senior_tournaments": 0,
+        "skipped_non_target_senior_matches": 0,
     }
-    assert tournament_names == {"Continental Senior Championships"}
+    assert tournament_names == {"European Badminton Championships"}
     assert match_keys == {"BWF_LIVE:3002"}
     assert player_names == {"Senior One", "Senior Two"}

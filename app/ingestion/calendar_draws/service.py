@@ -15,7 +15,7 @@ from app.db.models import (
     OfficialTournamentDocument,
     SourceKind,
 )
-from app.ingestion.adapters.bwf.eligibility import is_junior_tournament, is_paralympic_tournament
+from app.ingestion.approved_scope import classify_approved_senior_scope
 from app.ingestion.calendar_draws.client import (
     BWFCorporateCalendarClient,
     CalendarDocumentLink,
@@ -77,12 +77,9 @@ def is_allowed_target_competition(entry: CorporateCalendarEntry) -> bool:
 
 def eligibility_for_entry(entry: CorporateCalendarEntry) -> tuple[str, str]:
     payload = {"name": entry.name, "category": entry.category or ""}
-    if is_paralympic_tournament(payload):
-        return "EXCLUDED_PARA", "Explicit Para tournament/category marker in authorised calendar metadata"
-    if is_junior_tournament(payload):
-        return "EXCLUDED_JUNIOR", "Explicit junior/U-age tournament/category marker in authorised calendar metadata"
-    if not is_allowed_target_competition(entry):
-        return "EXCLUDED_NON_TARGET_SENIOR", "Outside the approved World Tour, individual World Championships, Continental Individual Championships, and Multi-Sport Games scope"
+    scope_status, scope_reason = classify_approved_senior_scope(payload)
+    if scope_status != "ELIGIBLE":
+        return scope_status, scope_reason
     if entry.start_date is None or entry.end_date is None:
         return "EXCLUDED_DATE_UNPARSEABLE", "Official calendar date range could not be parsed without guessing"
     return "ELIGIBLE", "Approved calendar category with a parseable official date range"

@@ -341,6 +341,7 @@ class Tournament(UUIDMixin, TimestampMixin, Base):
 
     name: Mapped[str] = mapped_column(String(512), nullable=False)
     source_name_raw: Mapped[str | None] = mapped_column(String(512))
+    source_category_raw: Mapped[str | None] = mapped_column(String(255))
     location_raw: Mapped[str | None] = mapped_column(String(512))
     country_code: Mapped[str | None] = mapped_column(String(8))
     start_date: Mapped[date | None] = mapped_column(Date)
@@ -441,6 +442,50 @@ class OfficialTournamentDocument(UUIDMixin, TimestampMixin, Base):
     parser_version: Mapped[str] = mapped_column(String(64), nullable=False)
     parser_status: Mapped[str] = mapped_column(String(32), nullable=False, default="CAPTURED_REVIEW_REQUIRED")
     parser_issue: Mapped[str | None] = mapped_column(Text)
+
+
+class OfficialDrawTopology(UUIDMixin, TimestampMixin, Base):
+    """A parser-validated topology emitted only from a direct official BWF draw document."""
+
+    __tablename__ = "official_draw_topologies"
+    __table_args__ = (UniqueConstraint("document_id", "discipline", "parser_version", name="official_draw_topology_document_discipline_parser"),)
+
+    document_id: Mapped[str] = mapped_column(ForeignKey("official_tournament_documents.id"), nullable=False, index=True)
+    discipline: Mapped[str] = mapped_column(String(8), nullable=False, index=True)
+    topology_status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING_REVIEW", index=True)
+    source_content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    parsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    parser_issue: Mapped[str | None] = mapped_column(Text)
+
+
+class OfficialDrawNode(UUIDMixin, TimestampMixin, Base):
+    """One source-labelled match position within a validated official-draw topology."""
+
+    __tablename__ = "official_draw_nodes"
+    __table_args__ = (UniqueConstraint("topology_id", "source_node_key", name="official_draw_nodes_topology_key"),)
+
+    topology_id: Mapped[str] = mapped_column(ForeignKey("official_draw_topologies.id"), nullable=False, index=True)
+    source_node_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    round_label: Mapped[str | None] = mapped_column(String(255))
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    participant_1_label: Mapped[str | None] = mapped_column(String(1024))
+    participant_2_label: Mapped[str | None] = mapped_column(String(1024))
+    winner_label: Mapped[str | None] = mapped_column(String(1024))
+    score_text: Mapped[str | None] = mapped_column(String(1024))
+
+
+class OfficialDrawNodeReconciliation(UUIDMixin, TimestampMixin, Base):
+    """Auditable source-node to canonical-match linkage; never infers a match identity."""
+
+    __tablename__ = "official_draw_node_reconciliations"
+    __table_args__ = (UniqueConstraint("node_id", "match_id", name="official_draw_node_match_link"),)
+
+    node_id: Mapped[str] = mapped_column(ForeignKey("official_draw_nodes.id"), nullable=False, index=True)
+    match_id: Mapped[str | None] = mapped_column(ForeignKey("matches.id"), index=True)
+    reconciliation_status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    confidence: Mapped[str] = mapped_column(String(32), nullable=False, default="UNVERIFIED")
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class Event(UUIDMixin, TimestampMixin, Base):
@@ -630,6 +675,76 @@ class StatisticRun(UUIDMixin, TimestampMixin, Base):
     derivation_version: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     input_row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class ModelSnapshot(UUIDMixin, TimestampMixin, Base):
+    """Versioned model definition; only an activated validated snapshot may publish forecasts."""
+
+    __tablename__ = "model_snapshots"
+    __table_args__ = (UniqueConstraint("model_key", "model_version", name="model_snapshots_key_version"),)
+
+    model_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    model_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_status: Mapped[str] = mapped_column(String(32), nullable=False, default="DRAFT", index=True)
+    training_cutoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    input_contract: Mapped[dict] = mapped_column(JSON, nullable=False)
+    calibration_status: Mapped[str] = mapped_column(String(32), nullable=False, default="NOT_EVALUATED")
+    evaluation_summary: Mapped[dict | None] = mapped_column(JSON)
+    methodology_reference: Mapped[str | None] = mapped_column(String(2048))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MatchForecastSnapshot(UUIDMixin, TimestampMixin, Base):
+    """Immutable pre-match forecast that can later be reconciled to an official result."""
+
+    __tablename__ = "match_forecast_snapshots"
+    __table_args__ = (UniqueConstraint("model_snapshot_id", "match_id", "input_cutoff", name="match_forecasts_model_match_cutoff"),)
+
+    model_snapshot_id: Mapped[str] = mapped_column(ForeignKey("model_snapshots.id"), nullable=False, index=True)
+    match_id: Mapped[str] = mapped_column(ForeignKey("matches.id"), nullable=False, index=True)
+    input_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    forecast_status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    participant_1_win_probability_bps: Mapped[int] = mapped_column(Integer, nullable=False)
+    participant_2_win_probability_bps: Mapped[int] = mapped_column(Integer, nullable=False)
+    confidence_label: Mapped[str] = mapped_column(String(32), nullable=False)
+    uncertainty_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_contributors: Mapped[list] = mapped_column(JSON, nullable=False)
+    provenance: Mapped[dict] = mapped_column(JSON, nullable=False)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    official_winner_participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id"))
+
+
+class HeadToHeadSnapshot(UUIDMixin, TimestampMixin, Base):
+    """Stored eligible head-to-head summary with an auditable input cutoff."""
+
+    __tablename__ = "head_to_head_snapshots"
+    __table_args__ = (UniqueConstraint("participant_a_id", "participant_b_id", "input_cutoff", name="head_to_head_pair_cutoff"),)
+
+    participant_a_id: Mapped[str] = mapped_column(ForeignKey("participants.id"), nullable=False, index=True)
+    participant_b_id: Mapped[str] = mapped_column(ForeignKey("participants.id"), nullable=False, index=True)
+    input_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    summary_status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    eligible_meetings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    participant_a_wins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    participant_b_wins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    evidence: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class TournamentSimulationSnapshot(UUIDMixin, TimestampMixin, Base):
+    """Versioned tournament forecast tied to a published, reconciled official draw topology."""
+
+    __tablename__ = "tournament_simulation_snapshots"
+    __table_args__ = (UniqueConstraint("model_snapshot_id", "tournament_id", "input_cutoff", name="tournament_simulation_model_tournament_cutoff"),)
+
+    model_snapshot_id: Mapped[str] = mapped_column(ForeignKey("model_snapshots.id"), nullable=False, index=True)
+    tournament_id: Mapped[str] = mapped_column(ForeignKey("tournaments.id"), nullable=False, index=True)
+    draw_topology_id: Mapped[str] = mapped_column(ForeignKey("official_draw_topologies.id"), nullable=False, index=True)
+    input_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    simulation_status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    simulation_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    probability_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    provenance: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
 # Relationships intentionally remain query-service based at v0.1. The schema is
