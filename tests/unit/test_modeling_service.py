@@ -25,11 +25,11 @@ def make_session():
     return sessionmaker(bind=engine, expire_on_commit=False)
 
 
-def add_fixture(session):
+def add_fixture(session, *, category: str = "HSBC BWF World Tour Super 500"):
     tournament = Tournament(
         name="BWF World Tour Test",
         source_name_raw="BWF World Tour Test",
-        source_category_raw="HSBC BWF World Tour Super 500",
+        source_category_raw=category,
         start_date=date(2026, 1, 1),
         end_date=date(2026, 1, 7),
         status="COMPLETED",
@@ -106,3 +106,15 @@ def test_model_pipeline_publishes_evaluated_model_h2h_and_forecast():
     assert forecast is not None
     assert forecast.forecast_status == "PUBLISHED"
     assert forecast.participant_1_win_probability_bps + forecast.participant_2_win_probability_bps == 10000
+
+
+def test_model_pipeline_excludes_non_target_senior_tournament_history():
+    factory = make_session()
+    with factory.begin() as session:
+        add_fixture(session, category="International Challenge")
+        summary = run_model_pipeline(session, Settings(modeling_max_forecasts_per_run=10))
+        model = session.scalar(select(ModelSnapshot).where(ModelSnapshot.model_status == "ACTIVE"))
+
+    assert summary["status"] == "insufficient_training_data"
+    assert summary["training_matches"] == 0
+    assert model is None

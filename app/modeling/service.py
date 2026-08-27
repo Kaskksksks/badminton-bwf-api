@@ -64,6 +64,9 @@ def _confirmed_participant_ids(session: Session) -> set[str]:
 def _training_matches(session: Session, confirmed_ids: set[str]) -> list[Match]:
     if not confirmed_ids:
         return []
+    allowed_tournament_ids = approved_tournament_ids(session)
+    if not allowed_tournament_ids:
+        return []
     return session.scalars(
         select(Match)
         .where(
@@ -72,6 +75,7 @@ def _training_matches(session: Session, confirmed_ids: set[str]) -> list[Match]:
             Match.winner_participant_id.is_not(None),
             Match.participant_1_id.in_(confirmed_ids),
             Match.participant_2_id.in_(confirmed_ids),
+            Match.tournament_id.in_(allowed_tournament_ids),
         )
         .order_by(Match.match_date, Match.created_at, Match.id)
     ).all()
