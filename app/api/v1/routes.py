@@ -14,6 +14,7 @@ from app.db.models import (
     Event,
     GameIntervalAssessment,
     GameStateObservation,
+    HeadToHeadSnapshot,
     ImportBatch,
     Match,
     MatchGame,
@@ -312,8 +313,20 @@ def get_player(player_id: str, session: DbSession) -> dict[str, Any]:
 
 @router.get("/players/{player_id}/matches")
 def get_player_matches(player_id: str, session: DbSession) -> dict[str, Any]:
-    # Name-only historical aliases are intentionally not represented as confirmed player identity matches.
-    return {"data": [], "meta": {**meta(), "notice": "Confirmed player-match linkage is available only after identity resolution."}}
+    player = session.get(Player, player_id)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+    participant_ids = session.scalars(
+        select(ParticipantMember.participant_id).where(ParticipantMember.player_id == player_id)
+    ).all()
+    if not participant_ids:
+        return {"data": [], "meta": {**meta("BWF_LIVE_AND_RESOLVED_IDENTITIES"), "notice": "No confirmed participant linkage is stored for this player."}}
+    values = session.scalars(
+        select(Match).where(or_(Match.participant_1_id.in_(participant_ids), Match.participant_2_id.in_(participant_ids)))
+        .order_by(desc(Match.match_date), Match.id)
+        .limit(500)
+    ).all()
+    return {"data": [serialize_match(value) for value in values], "meta": meta("BWF_LIVE_AND_RESOLVED_IDENTITIES")}
 
 
 @router.get("/players/{player_id}/statistics")
@@ -795,6 +808,22 @@ def get_event(event_id: str, session: DbSession) -> dict[str, Any]:
 
 @router.get("/head-to-head/{participant_a}/{participant_b}")
 def head_to_head(participant_a: str, participant_b: str, session: DbSession) -> dict[str, Any]:
+    a, b = sorted((participant_a, participant_b))
+    snapshot = session.scalar(
+        select(HeadToHeadSnapshot)
+        .where(
+            HeadToHeadSnapshot.participant_a_id == a,
+            HeadToHeadSnapshot.participant_b_id == b,
+            HeadToHeadSnapshot.summary_status == "VALIDATED",
+        )
+        .order_by(desc(HeadToHeadSnapshot.input_cutoff))
+    )
+    if snapshot:
+        wins = {
+            participant_a: snapshot.participant_a_wins if participant_a == a else snapshot.participant_b_wins,
+            participant_b: snapshot.participant_b_wins if participant_b == b else snapshot.participant_a_wins,
+        }
+        return {"data": {"participant_a": participant_a, "participant_b": participant_b, "meetings": snapshot.eligible_meetings, "wins": wins, "input_cutoff": snapshot.input_cutoff.isoformat(), "snapshot_status": snapshot.summary_status, "evidence": snapshot.evidence}, "meta": meta("PLATFORM_MODEL")}
     values = session.scalars(
         select(Match).where(
             or_(
@@ -805,7 +834,7 @@ def head_to_head(participant_a: str, participant_b: str, session: DbSession) -> 
     ).all()
     wins_a = sum(match.winner_participant_id == participant_a for match in values)
     wins_b = sum(match.winner_participant_id == participant_b for match in values)
-    return {"data": {"participant_a": participant_a, "participant_b": participant_b, "meetings": len(values), "wins": {participant_a: wins_a, participant_b: wins_b}}, "meta": meta()}
+    return {"data": {"participant_a": participant_a, "participant_b": participant_b, "meetings": len(values), "wins": {participant_a: wins_a, participant_b: wins_b}, "snapshot_status": "NOT_PUBLISHED"}, "meta": meta()}
 
 
 @router.get("/matches/{match_id}/insights")
