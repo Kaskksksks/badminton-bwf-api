@@ -303,14 +303,14 @@ def get_match(match_id: str, session: Session = Depends(get_db)) -> WebsiteMatch
 def get_match_forecast(match_id: str, session: Session = Depends(get_db)) -> WebsiteMatchForecastResponse:
     """Return immutable published forecast fields or explicit field-level withholding reasons."""
     availability, snapshot = match_forecast_snapshot(session, match_id)
-    common = {"available": availability.available, "reason": availability.reason}
+    field = lambda name: ForecastFieldAvailability(available=availability.available, reason=f"{name}_{availability.reason}")
     return WebsiteMatchForecastResponse(
         match_id=match_id,
         availability=availability,
-        win_probability=ForecastFieldAvailability(**common),
-        confidence=ForecastFieldAvailability(**common),
-        evidence_contributors=ForecastFieldAvailability(**common),
-        uncertainty=ForecastFieldAvailability(**common),
+        win_probability=field("win_probability"),
+        confidence=field("confidence"),
+        evidence_contributors=field("contributors"),
+        uncertainty=field("uncertainty"),
         snapshot=snapshot,
         meta=metadata(),
     )
