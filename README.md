@@ -16,9 +16,11 @@ The service has a normalized relational core for tournaments, events, players, p
 | Cutover enforcement from 23 August 2026 | Implemented |
 | Adaptive polling decision engine and worker entry point | Implemented |
 | Immutable changed live game-state observations | Implemented |
+| Live participant-context linkage for active eligibility | Implemented |
 | Conservative 11-point interval assessment | Implemented |
 | Coverage-aware interval statistics foundation | Implemented |
 | Versioned FastAPI public and protected-admin endpoints | Implemented |
+| Evidence-gated Elo model, forecast, H2H, and simulation producers | Implemented; requires eligible data and validated draw topology |
 | Alembic baseline migration and Docker Compose topology | Implemented |
 
 ## Data-source rules
@@ -66,6 +68,11 @@ cp .env.example .env
 | `POLL_TOURNAMENT_MINUTES` | Active-tournament cadence |
 | `POLL_LIVE_MATCH_SECONDS` | Live-match target cadence |
 | `SCHEDULER_ENABLED` | Enables in-process scheduler only when explicitly set; default `false` |
+| `BWF_RANKINGS_ENABLED` / `BWF_RANKINGS_PERMISSION_REFERENCE` | Enables authorised ranking collection only after permission/licensing is confirmed |
+| `BWF_PLAYER_PROFILES_ENABLED` / `BWF_PLAYER_PROFILES_PERMISSION_REFERENCE` | Enables authorised player-profile collection only after permission/licensing is confirmed |
+| `BWF_CALENDAR_ENABLED` / `BWF_CALENDAR_PERMISSION_REFERENCE` | Enables authorised corporate-calendar and direct-draw collection only after permission is confirmed |
+| `BWF_DRAW_PARSER_ENABLED` | Extracts explicit discipline sections from captured PDFs into review-required topology candidates |
+| `MODELING_SCHEDULER_ENABLED` | Enables evidence-gated model/forecast/H2H/simulation publication jobs |
 | `ADMIN_API_KEY` | Required for protected administrative endpoints |
 
 ## Local development
@@ -107,7 +114,7 @@ Compose creates PostgreSQL, a public API service, and a separate worker. The API
 
 ## API contract
 
-Public endpoints use `/api/v1` and return consistent `data` plus `meta` envelopes. Implemented resources include players, rankings placeholder, tournaments, events, matches, games, live states, snapshots, 11-point interval assessments, live matches, head-to-head, insight scaffolding, health, data status, and statistics coverage.
+Public endpoints use `/api/v1` and return consistent `data` plus `meta` envelopes. Implemented resources include players, rankings, tournaments, events, matches, games, live states, snapshots, 11-point interval assessments, live matches, head-to-head, insight scaffolding, model readiness, forecasts, official draw metadata/topology, tournament simulations, health, data status, and statistics coverage. Publication endpoints return explicit evidence-based withholding reasons until their prerequisites are met.
 
 | Endpoint | Purpose |
 |---|---|
@@ -121,6 +128,11 @@ Public endpoints use `/api/v1` and return consistent `data` plus `meta` envelope
 | `GET /api/v1/live/matches` | Database-only current live read model |
 | `GET /api/v1/participants/{id}/interval-statistics` | Coverage-aware derived interval metrics |
 | `GET /api/v1/admin/import-batches` | Protected import status and counts |
+| `POST /api/v1/admin/rankings/run` | Protected one-shot authorised ranking ingestion |
+| `POST /api/v1/admin/draws/documents/{id}/parse` | Stage topology candidates from an exact captured-PDF hash |
+| `POST /api/v1/admin/draws/nodes/{id}/reconcile` | Record explicit reviewer-confirmed canonical-match linkage |
+| `POST /api/v1/admin/draws/topologies/{id}/publish` | Publish only a fully reconciled topology |
+| `POST /api/v1/admin/modeling/run` | Train/evaluate and publish eligible model outputs |
 
 ## Testing
 

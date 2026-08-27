@@ -13,10 +13,14 @@ from app.db.base import SessionLocal
 from app.ingestion.adapters.bwf.service import synchronize_current_bwf
 from app.ingestion.calendar_draws.service import synchronize_corporate_calendar
 from app.ingestion.rankings.service import run_rankings_job
+from app.ingestion.player_profiles.service import run_full_queue
+from app.modeling.service import run_model_pipeline
 
 logger = logging.getLogger(__name__)
 JOB_ID = "bwf-sync"
 RANKINGS_JOB_ID = "bwf-rankings-weekly"
+PLAYER_PROFILES_JOB_ID = "bwf-player-profiles-daily"
+MODEL_JOB_ID = "bwf-model-publication-daily"
 CALENDAR_JOB_ID = "bwf-corporate-calendar"
 CALENDAR_DEFERRED_RETRY_JOB_ID = "bwf-corporate-calendar-deferred-retry"
 CALENDAR_DEFERRED_RETRY_SECONDS = 90
@@ -119,6 +123,48 @@ def run_bwf_corporate_calendar_job(
             release_process_memory(reason="bwf_corporate_calendar_complete")
 
 
+def run_player_profiles_job() -> None:
+    """Run one bounded authorised identity batch without overlapping live collection."""
+    settings = get_settings()
+    if not settings.bwf_player_profiles_scheduler_enabled:
+        logger.info("bwf_player_profiles_job_skipped", extra={"reason": "scheduler_disabled"})
+        return
+    with collection_slot("player_profiles") as acquired:
+        if not acquired:
+            logger.info("bwf_player_profiles_job_deferred", extra={"reason": "collection_slot_unavailable"})
+            return
+        try:
+            with SessionLocal.begin() as session:
+                result = run_full_queue(session, settings=settings)
+            logger.info("bwf_player_profiles_job_complete", extra=result)
+        except Exception:
+            logger.exception("bwf_player_profiles_job_failed")
+            raise
+        finally:
+            release_process_memory(reason="player_profiles_complete")
+
+
+def run_model_publication_job() -> None:
+    """Publish model outputs only after the modeling service validates its prerequisites."""
+    settings = get_settings()
+    if not settings.modeling_scheduler_enabled:
+        logger.info("bwf_model_publication_job_skipped", extra={"reason": "scheduler_disabled"})
+        return
+    with collection_slot("model_publication") as acquired:
+        if not acquired:
+            logger.info("bwf_model_publication_job_deferred", extra={"reason": "collection_slot_unavailable"})
+            return
+        try:
+            with SessionLocal.begin() as session:
+                result = run_model_pipeline(session, settings=settings)
+            logger.info("bwf_model_publication_job_complete", extra=result)
+        except Exception:
+            logger.exception("bwf_model_publication_job_failed")
+            raise
+        finally:
+            release_process_memory(reason="model_publication_complete")
+
+
 def build_scheduler() -> BackgroundScheduler:
     settings = get_settings()
     scheduler = BackgroundScheduler(timezone="UTC")
@@ -135,6 +181,28 @@ def build_scheduler() -> BackgroundScheduler:
         # intervals are set from confirmed live/current/idle source state.
         next_run_time=datetime.now(timezone.utc),
     )
+    if settings.bwf_player_profiles_enabled and settings.bwf_player_profiles_scheduler_enabled:
+        scheduler.add_job(
+            run_player_profiles_job,
+            trigger="interval",
+            hours=settings.bwf_player_profiles_refresh_hours,
+            id=PLAYER_PROFILES_JOB_ID,
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            next_run_time=datetime.now(timezone.utc),
+        )
+    if settings.modeling_scheduler_enabled:
+        scheduler.add_job(
+            run_model_publication_job,
+            trigger="interval",
+            hours=settings.modeling_refresh_hours,
+            id=MODEL_JOB_ID,
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            next_run_time=datetime.now(timezone.utc),
+        )
     # Calendar/draw discovery is separately opt-in and deliberately low frequency.
     # It does not reschedule or otherwise alter adaptive senior live polling.
     if settings.bwf_calendar_enabled and settings.bwf_calendar_scheduler_enabled:

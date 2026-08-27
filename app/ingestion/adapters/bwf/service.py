@@ -19,6 +19,7 @@ from app.db.models import (
     Participant,
     ParticipantKind,
     ParticipantMember,
+    MatchParticipantContext,
     Player,
     RawIngestionRecord,
     SourceEntityIdentifier,
@@ -256,6 +257,20 @@ def upsert_live_match(session: Session, source: DataSource, tournament: Tourname
     match.participant_1_id = p1.id
     match.participant_2_id = p2.id
     match.match_duration_seconds = int(live["duration"] * 60) if isinstance(live.get("duration"), (int, float)) else match.match_duration_seconds
+    for side, participant in ((1, p1), (2, p2)):
+        context = session.scalar(select(MatchParticipantContext).where(
+            MatchParticipantContext.match_id == match.id,
+            MatchParticipantContext.side == side,
+        ))
+        if context is None:
+            session.add(MatchParticipantContext(
+                match_id=match.id,
+                participant_id=participant.id,
+                side=side,
+                source_record_id=None,
+            ))
+        else:
+            context.participant_id = participant.id
     session.flush()
 
     # The observed BWF route exposes current G1-G3 totals, not a rally stream.

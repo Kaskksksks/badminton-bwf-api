@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.db.models import GameIntervalAssessment, Match, MatchGame
@@ -82,11 +82,20 @@ def interval_metrics_for_participant(session: Session, participant_id: str) -> d
 
 
 def interval_coverage_summary(session: Session) -> dict[str, int]:
-    rows = session.scalars(select(GameIntervalAssessment).where(GameIntervalAssessment.interval_type == "ELEVEN_POINT")).all()
+    """Aggregate coverage in SQL instead of loading every assessment row."""
+    row = session.execute(
+        select(
+            func.count(GameIntervalAssessment.id),
+            func.coalesce(func.sum(case((GameIntervalAssessment.detection_method == "OBSERVED_EXACT_SCORE", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((GameIntervalAssessment.detection_method == "INFERRED_CROSSING", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((GameIntervalAssessment.detection_method == "UNDETERMINED", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((GameIntervalAssessment.interval_exact.is_(True), 1), else_=0)), 0),
+        ).where(GameIntervalAssessment.interval_type == "ELEVEN_POINT")
+    ).one()
     return {
-        "interval_assessments": len(rows),
-        "observed_exact_score_states": sum(item.detection_method == "OBSERVED_EXACT_SCORE" for item in rows),
-        "inferred_crossings": sum(item.detection_method == "INFERRED_CROSSING" for item in rows),
-        "undetermined": sum(item.detection_method == "UNDETERMINED" for item in rows),
-        "source_exact_events": sum(item.interval_exact for item in rows),
+        "interval_assessments": int(row[0] or 0),
+        "observed_exact_score_states": int(row[1] or 0),
+        "inferred_crossings": int(row[2] or 0),
+        "undetermined": int(row[3] or 0),
+        "source_exact_events": int(row[4] or 0),
     }

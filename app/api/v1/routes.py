@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, desc, or_, select
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import require_admin
@@ -34,6 +35,12 @@ from app.ingestion.player_profiles.country_mismatch import (
     MANUAL_OVERRIDE_POLICY_VERSION,
     evaluate_country_mismatch_evidence,
 )
+from app.ingestion.calendar_draws.topology import (
+    publish_topology_after_full_reconciliation,
+    record_canonical_reconciliation,
+    stage_topology_from_extracted_text,
+)
+from app.ingestion.rankings.service import synchronize_rankings
 from app.ingestion.player_profiles.service import (
     NO_EXACT_CANDIDATE_CASE_TYPE,
     NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
@@ -48,6 +55,21 @@ from app.ingestion.player_profiles.service import (
 from app.statistics.service import interval_coverage_summary, interval_metrics_for_participant
 
 router = APIRouter(tags=["v1"])
+
+
+class DrawParseRequest(BaseModel):
+    discipline: str = Field(pattern="^(MS|WS|MD|WD|XD)$")
+    source_content_hash: str = Field(min_length=32, max_length=128)
+    extracted_text: str = Field(min_length=1, max_length=2_000_000)
+
+
+class DrawReconcileRequest(BaseModel):
+    match_id: str = Field(min_length=1, max_length=64)
+    rationale: str = Field(min_length=1, max_length=4000)
+
+
+class DrawPublishRequest(BaseModel):
+    review_note: str = Field(min_length=1, max_length=4000)
 DbSession = Annotated[Session, Depends(get_db)]
 
 
@@ -567,6 +589,73 @@ def review_identity_link(link_id: str, session: DbSession, action: str = Query(.
     return {"data": {"link_id": link.id, "decision_status": link.decision_status}, "meta": meta("BWF_OFFICIAL_PLAYER_PROFILES")}
 
 
+@router.post("/admin/rankings/run", dependencies=[Depends(require_admin)])
+def run_rankings_now(session: DbSession) -> dict[str, Any]:
+    """Run one explicitly authorised ranking batch; never fetches during a public read."""
+    with collection_slot("rankings_batch") as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail="Another collection operation is in progress; retry the ranking batch later.")
+        try:
+            summary = synchronize_rankings(session, settings=get_settings())
+            session.commit()
+        except RuntimeError as exc:
+            session.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception:
+            session.rollback()
+            raise
+    return {"data": summary, "meta": meta("BWF_OFFICIAL_RANKINGS")}
+
+
+@router.post("/admin/modeling/run", dependencies=[Depends(require_admin)])
+def run_modeling_now(session: DbSession) -> dict[str, Any]:
+    """Train/evaluate and publish only evidence-complete model outputs."""
+    from app.modeling.service import run_model_pipeline
+
+    with collection_slot("model_publication") as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail="Another collection operation is in progress; retry model publication later.")
+        summary = run_model_pipeline(session, settings=get_settings())
+        session.commit()
+    return {"data": summary, "meta": meta("PLATFORM_MODEL")}
+
+
+@router.post("/admin/draws/documents/{document_id}/parse", dependencies=[Depends(require_admin)])
+def parse_draw_document(document_id: str, payload: DrawParseRequest, session: DbSession) -> dict[str, Any]:
+    """Stage parser output from the exact captured PDF hash for later reconciliation."""
+    topology = stage_topology_from_extracted_text(
+        session,
+        document_id=document_id,
+        discipline=payload.discipline,
+        source_content_hash=payload.source_content_hash,
+        extracted_text=payload.extracted_text,
+    )
+    session.commit()
+    return {"data": {"topology_id": topology.id, "topology_status": topology.topology_status}, "meta": meta("BWF_CORPORATE_CALENDAR")}
+
+
+@router.post("/admin/draws/nodes/{node_id}/reconcile", dependencies=[Depends(require_admin)])
+def reconcile_draw_node(node_id: str, payload: DrawReconcileRequest, session: DbSession) -> dict[str, Any]:
+    """Store an explicit reviewer-confirmed source-node to canonical-match link."""
+    try:
+        record = record_canonical_reconciliation(session, node_id=node_id, match_id=payload.match_id, rationale=payload.rationale)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    session.commit()
+    return {"data": {"reconciliation_id": record.id, "status": record.reconciliation_status}, "meta": meta("REVIEWED_DRAW_RECONCILIATION")}
+
+
+@router.post("/admin/draws/topologies/{topology_id}/publish", dependencies=[Depends(require_admin)])
+def publish_draw_topology(topology_id: str, payload: DrawPublishRequest, session: DbSession) -> dict[str, Any]:
+    """Publish a topology only after every extracted node has been reconciled."""
+    try:
+        topology = publish_topology_after_full_reconciliation(session, topology_id=topology_id, review_note=payload.review_note)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    session.commit()
+    return {"data": {"topology_id": topology.id, "topology_status": topology.topology_status}, "meta": meta("REVIEWED_DRAW_RECONCILIATION")}
+
+
 @router.get("/tournaments")
 def list_tournaments(
     session: DbSession,
@@ -618,8 +707,8 @@ def list_matches(
         query = query.where(Match.match_date >= from_date)
     if to_date:
         query = query.where(Match.match_date <= to_date)
-    total = len(session.scalars(query).all())
-    values = session.scalars(query.order_by(desc(Match.match_date)).offset((page - 1) * page_size).limit(page_size)).all()
+    total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
+    values = session.scalars(query.order_by(desc(Match.match_date), Match.id).offset((page - 1) * page_size).limit(page_size)).all()
     return page_payload([serialize_match(value) for value in values], page, page_size, total)
 
 

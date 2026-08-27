@@ -9,7 +9,10 @@ before a topology becomes `VALIDATED_RECONCILED` and therefore public.
 
 from __future__ import annotations
 
+from io import BytesIO
 import re
+
+from pypdf import PdfReader
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -26,6 +29,13 @@ from app.db.models import (
 from app.ingestion.calendar_draws.client import is_allowed_draw_document_url
 
 SUPPORTED_DISCIPLINES = {"MS", "WS", "MD", "WD", "XD"}
+DISCIPLINE_HEADINGS = {
+    "MS": {"MS", "MEN'S SINGLES", "MENS SINGLES", "MEN SINGLES"},
+    "WS": {"WS", "WOMEN'S SINGLES", "WOMENS SINGLES", "WOMEN SINGLES"},
+    "MD": {"MD", "MEN'S DOUBLES", "MENS DOUBLES", "MEN DOUBLES"},
+    "WD": {"WD", "WOMEN'S DOUBLES", "WOMENS DOUBLES", "WOMEN DOUBLES"},
+    "XD": {"XD", "MIXED DOUBLES"},
+}
 PARSER_VERSION = "bwf-direct-draw-topology-v1"
 ROUND_PATTERN = re.compile(r"^(?:round\s+of\s+)?(?:128|64|32|16|8|4)|quarter[- ]?final|semi[- ]?final|final$", re.IGNORECASE)
 PAIR_PATTERN = re.compile(r"^(?P<left>.+?)\s+(?:v(?:s\.?)?|–|—|-|\|)\s+(?P<right>.+?)$", re.IGNORECASE)
@@ -38,6 +48,30 @@ class ExtractedDrawNode:
     display_order: int
     participant_1_label: str
     participant_2_label: str
+
+
+def extract_direct_draw_text(pdf_bytes: bytes) -> str:
+    """Extract text from captured PDF bytes; never fetches or accepts a remote target."""
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Draw document is not a PDF")
+    reader = PdfReader(BytesIO(pdf_bytes), strict=False)
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def discipline_sections(extracted_text: str) -> dict[str, str]:
+    """Split text only on explicit, standalone discipline headings."""
+    heading_to_discipline = {heading: discipline for discipline, headings in DISCIPLINE_HEADINGS.items() for heading in headings}
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for raw_line in extracted_text.splitlines():
+        normalized = " ".join(raw_line.upper().replace("–", " ").split()).strip(" :.-")
+        if normalized in heading_to_discipline:
+            current = heading_to_discipline[normalized]
+            sections.setdefault(current, [])
+            continue
+        if current:
+            sections[current].append(raw_line)
+    return {discipline: "\n".join(lines) for discipline, lines in sections.items()}
 
 
 def parse_direct_draw_text(extracted_text: str, *, discipline: str) -> list[ExtractedDrawNode]:

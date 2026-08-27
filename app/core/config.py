@@ -84,6 +84,16 @@ class Settings(BaseSettings):
     bwf_player_profiles_source_revision: str = "bwf-public-player-profile-v1"
     bwf_player_profiles_auto_confirm: bool = False
     bwf_player_profiles_dry_run: bool = True
+    bwf_player_profiles_scheduler_enabled: bool = False
+    bwf_player_profiles_refresh_hours: int = Field(default=24, ge=6, le=168)
+
+    # Model publication is deterministic and evidence-gated. It never creates a
+    # model output unless the required confirmed identities and validated match
+    # history are present.
+    modeling_scheduler_enabled: bool = False
+    modeling_refresh_hours: int = Field(default=24, ge=6, le=168)
+    modeling_max_forecasts_per_run: int = Field(default=5000, ge=1, le=20000)
+    modeling_simulation_count: int = Field(default=1000, ge=100, le=100000)
 
     # Corporate calendar and direct draw PDFs are a separate authorised source.
     # They remain disabled until a deployment has an explicit permission reference
@@ -99,6 +109,7 @@ class Settings(BaseSettings):
     bwf_draw_document_max_bytes: int = Field(default=10_000_000, ge=100_000, le=25_000_000)
     bwf_draw_document_horizon_days: int = Field(default=14, ge=0, le=60)
     bwf_draw_document_max_per_run: int = Field(default=4, ge=0, le=20)
+    bwf_draw_parser_enabled: bool = False
     bwf_calendar_source_revision: str = "bwf-corporate-calendar-v1"
 
     @field_validator("bwf_calendar_permission_reference")

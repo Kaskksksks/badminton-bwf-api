@@ -16,6 +16,7 @@ from app.db.models import (
     SourceKind,
 )
 from app.ingestion.approved_scope import classify_approved_senior_scope
+from app.ingestion.calendar_draws.topology import discipline_sections, extract_direct_draw_text, parse_direct_draw_text, stage_topology_from_extracted_text
 from app.ingestion.calendar_draws.client import (
     BWFCorporateCalendarClient,
     CalendarDocumentLink,
@@ -175,12 +176,15 @@ def capture_draw_document(
     calendar_entry: OfficialTournamentCalendarEntry,
     document: CalendarDocumentLink,
     client: BWFCorporateCalendarClient,
+    settings: Settings | None = None,
 ) -> bool:
-    """Retrieve one direct official draw PDF and store immutable metadata only.
+    """Retrieve one direct official draw PDF and store immutable metadata.
 
-    A full bracket parser is deliberately not enabled by this collector. The document is
-    source-validated and versioned, then marked for real-document parser validation.
+    When explicitly enabled, PDF text is extracted and discipline-specific candidate
+    topologies are staged as review-required records. No automatic identity or canonical
+    match reconciliation is performed here.
     """
+    settings = settings or get_settings()
     response = client.fetch_draw_document(document.url)
     existing = session.scalar(
         select(OfficialTournamentDocument).where(
@@ -190,21 +194,44 @@ def capture_draw_document(
     )
     if existing:
         return False
-    session.add(
-        OfficialTournamentDocument(
-            calendar_entry_id=calendar_entry.id,
-            source_url=response.url,
-            document_label=document.label,
-            retrieved_at=response.retrieved_at,
-            content_hash=response.content_hash,
-            content_type=response.content_type,
-            byte_size=len(response.content),
-            parser_version=PARSER_VERSION,
-            parser_status="CAPTURED_REVIEW_REQUIRED",
-            parser_issue="Draw topology is not materialised until verified against authorised real-document fixtures.",
-        )
+    stored = OfficialTournamentDocument(
+        calendar_entry_id=calendar_entry.id,
+        source_url=response.url,
+        document_label=document.label,
+        retrieved_at=response.retrieved_at,
+        content_hash=response.content_hash,
+        content_type=response.content_type,
+        byte_size=len(response.content),
+        parser_version=PARSER_VERSION,
+        parser_status="CAPTURED_REVIEW_REQUIRED",
+        parser_issue="Draw topology is not materialised until verified against authorised real-document fixtures.",
     )
+    session.add(stored)
     session.flush()
+    if settings.bwf_draw_parser_enabled:
+        try:
+            extracted_text = extract_direct_draw_text(response.content)
+            sections = discipline_sections(extracted_text)
+            staged = []
+            for discipline, section_text in sections.items():
+                if parse_direct_draw_text(section_text, discipline=discipline):
+                    staged.append(stage_topology_from_extracted_text(
+                        session,
+                        document_id=stored.id,
+                        discipline=discipline,
+                        source_content_hash=response.content_hash,
+                        extracted_text=section_text,
+                    ))
+            if staged:
+                stored.parser_status = "PARSED_REVIEW_REQUIRED"
+                stored.parser_issue = f"Staged {len(staged)} discipline topology candidate(s); explicit canonical reconciliation is still required."
+            else:
+                stored.parser_status = "PARSE_EMPTY"
+                stored.parser_issue = "PDF text extraction produced no explicit discipline draw nodes."
+        except Exception as exc:
+            stored.parser_status = "PARSE_FAILED"
+            stored.parser_issue = f"Direct-PDF parser failed safely: {exc}"
+        session.flush()
     return True
 
 
@@ -284,7 +311,7 @@ def synchronize_corporate_calendar(
                 if draw_was_already_captured(session, source_url=document.url):
                     continue
                 draw_requests += 1
-                if capture_draw_document(session, calendar_entry=calendar_entry, document=document, client=client):
+                if capture_draw_document(session, calendar_entry=calendar_entry, document=document, client=client, settings=settings):
                     draw_captured += 1
 
         return {

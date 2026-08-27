@@ -263,11 +263,22 @@ def list_website_matches(
         query = query.where(Match.match_date >= from_date)
     if to_date:
         query = query.where(Match.match_date <= to_date)
-    candidates = session.scalars(query.order_by(Match.match_date.desc(), Match.actual_start_time.desc())).all()
-    allowed_ids = approved_tournament_ids(session, {value.tournament_id for value in candidates if value.tournament_id})
-    eligible = [value for value in candidates if value.tournament_id in allowed_ids]
-    total = len(eligible)
-    values = eligible[(page - 1) * page_size : page * page_size]
+    # Filter and paginate in SQL. The previous implementation materialised every
+    # historical match before slicing, which could exhaust a small deployment.
+    allowed_ids = approved_tournament_ids(session)
+    if not allowed_ids:
+        return WebsiteMatchListResponse(
+            data=[],
+            pagination=PageInfo(page=page, page_size=page_size, total=0),
+            meta=metadata("BWF_LIVE" if scope == "live" else "PLATFORM"),
+        )
+    query = query.where(Match.tournament_id.in_(allowed_ids))
+    total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
+    values = session.scalars(
+        query.order_by(Match.match_date.desc(), Match.actual_start_time.desc(), Match.id)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
     context = fetch_context(session, values)
     return WebsiteMatchListResponse(
         data=[make_match(value, *context) for value in values],
