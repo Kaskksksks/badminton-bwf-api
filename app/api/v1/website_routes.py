@@ -50,8 +50,9 @@ from app.api.v1.website_contract import (
     WebsiteDrawDocumentListResponse,
     ForecastFieldAvailability,
     WebsiteMatchForecastResponse,
+    WebsiteTournamentSimulationResponse,
 )
-from app.api.v1.website_contract_service import active_senior_participants, approved_tournament_ids, calendar_entries, draw_documents, match_forecast_snapshot, model_contract, official_bracket
+from app.api.v1.website_contract_service import active_senior_participants, approved_tournament_ids, calendar_entries, draw_documents, match_forecast_snapshot, model_contract, official_bracket, tournament_simulation_snapshot
 
 router = APIRouter(prefix="/website", tags=["website-integration"])
 DbSession = Session
@@ -387,6 +388,18 @@ def get_official_bracket(
         document_id=document_id,
         topology_id=topology_id,
         data=data,
+        meta=metadata("BWF_CORPORATE_CALENDAR"),
+    )
+
+
+@router.get("/calendar/{calendar_entry_id}/simulation", response_model=WebsiteTournamentSimulationResponse)
+def get_tournament_simulation(calendar_entry_id: str, session: Session = Depends(get_db)) -> WebsiteTournamentSimulationResponse:
+    """Return only a published simulation linked to a reconciled direct BWF draw topology."""
+    availability, snapshot = tournament_simulation_snapshot(session, calendar_entry_id)
+    return WebsiteTournamentSimulationResponse(
+        calendar_entry_id=calendar_entry_id,
+        availability=availability,
+        snapshot=snapshot,
         meta=metadata("BWF_CORPORATE_CALENDAR"),
     )
 

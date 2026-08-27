@@ -11,6 +11,7 @@ from app.api.v1.website_contract import (
     CalendarProvenance,
     ContractAvailability,
     WebsiteMatchForecastSnapshot,
+    WebsiteTournamentSimulationSnapshot,
     OfficialBracketNode,
     SeniorParticipantContract,
     WebsiteCalendarEntry,
@@ -253,6 +254,57 @@ def match_forecast_snapshot(session: Session, match_id: str) -> tuple[ContractAv
         uncertainty_summary=forecast.uncertainty_summary,
         evidence_contributors=[str(value) for value in forecast.evidence_contributors],
         provenance=forecast.provenance,
+    )
+
+
+def tournament_simulation_snapshot(session: Session, calendar_entry_id: str) -> tuple[ContractAvailability, WebsiteTournamentSimulationSnapshot | None]:
+    """Expose a simulation only if it is tied to an eligible calendar entry and a reconciled direct-draw topology."""
+    prerequisites = [
+        "eligible official calendar entry",
+        "canonical tournament link",
+        "published official draw topology",
+        "validated reconciliation to canonical matches",
+        "active evaluated model",
+        "published tournament simulation snapshot",
+    ]
+    entry = session.get(OfficialTournamentCalendarEntry, calendar_entry_id)
+    if entry is None or entry.eligibility_status != "ELIGIBLE":
+        return ContractAvailability(available=False, reason="eligible_calendar_entry_not_found", prerequisites=prerequisites, eligible_record_count=0), None
+    tournaments = session.scalars(select(Tournament).where(Tournament.source_url == entry.source_url)).all() if entry.source_url else []
+    eligible_tournaments = [item for item in tournaments if item.id in approved_tournament_ids(session, {item.id for item in tournaments})]
+    if len(eligible_tournaments) != 1:
+        return ContractAvailability(available=False, reason="canonical_tournament_link_not_available", prerequisites=prerequisites, eligible_record_count=0), None
+    document_ids = set(session.scalars(select(OfficialTournamentDocument.id).where(OfficialTournamentDocument.calendar_entry_id == calendar_entry_id)).all())
+    if not document_ids:
+        return ContractAvailability(available=False, reason="no_authorised_direct_draw_document", prerequisites=prerequisites, eligible_record_count=0), None
+    row = session.execute(
+        select(TournamentSimulationSnapshot, ModelSnapshot, OfficialDrawTopology)
+        .join(ModelSnapshot, ModelSnapshot.id == TournamentSimulationSnapshot.model_snapshot_id)
+        .join(OfficialDrawTopology, OfficialDrawTopology.id == TournamentSimulationSnapshot.draw_topology_id)
+        .where(
+            TournamentSimulationSnapshot.tournament_id == eligible_tournaments[0].id,
+            TournamentSimulationSnapshot.simulation_status == "PUBLISHED",
+            ModelSnapshot.model_status == "ACTIVE",
+            ModelSnapshot.calibration_status == "EVALUATED",
+            OfficialDrawTopology.topology_status == PUBLISHABLE_TOPOLOGY_STATUS,
+        )
+        .order_by(TournamentSimulationSnapshot.input_cutoff.desc())
+    ).first()
+    if row is None:
+        return ContractAvailability(available=False, reason="no_published_tournament_simulation_snapshot", prerequisites=prerequisites, eligible_record_count=0), None
+    simulation, model, topology = row
+    if topology.document_id not in document_ids:
+        return ContractAvailability(available=False, reason="simulation_topology_not_linked_to_calendar_document", prerequisites=prerequisites, eligible_record_count=0), None
+    return ContractAvailability(available=True, reason="published_reconciled_tournament_simulation_snapshot", prerequisites=prerequisites, eligible_record_count=1), WebsiteTournamentSimulationSnapshot(
+        calendar_entry_id=calendar_entry_id,
+        tournament_id=simulation.tournament_id,
+        model_key=model.model_key,
+        model_version=model.model_version,
+        draw_topology_id=simulation.draw_topology_id,
+        input_cutoff=simulation.input_cutoff,
+        simulation_count=simulation.simulation_count,
+        probability_payload=simulation.probability_payload,
+        provenance=simulation.provenance,
     )
 
 

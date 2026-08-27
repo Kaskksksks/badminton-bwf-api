@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.api.v1.website_contract_service import active_senior_participants, calendar_entries, draw_documents, model_contract, official_bracket
+from app.api.v1.website_contract_service import active_senior_participants, calendar_entries, draw_documents, model_contract, official_bracket, tournament_simulation_snapshot
 from app.db.base import Base, get_db
 from app.db.models import (
     DataSource,
@@ -138,6 +138,17 @@ def test_model_contracts_are_withheld_without_real_evidence() -> None:
     assert contract["simulations"].available is False
 
 
+def test_tournament_simulation_contract_requires_a_canonical_calendar_link_and_published_reconciled_snapshot() -> None:
+    factory = session_factory()
+    with factory.begin() as session:
+        entry = eligible_calendar_entry(session)
+        availability, snapshot = tournament_simulation_snapshot(session, entry.id)
+
+    assert availability.available is False
+    assert availability.reason == "canonical_tournament_link_not_available"
+    assert snapshot is None
+
+
 def test_public_contract_routes_return_read_only_metadata_and_explicitly_withheld_future_capabilities() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
@@ -165,6 +176,7 @@ def test_public_contract_routes_return_read_only_metadata_and_explicitly_withhel
         participants = client.get("/api/v1/website/active-participants")
         readiness = client.get("/api/v1/website/model-contract")
         forecast = client.get("/api/v1/website/matches/not-a-match/forecast")
+        simulation = client.get(f"/api/v1/website/calendar/{entry_id}/simulation")
     finally:
         app.dependency_overrides.clear()
 
@@ -184,6 +196,8 @@ def test_public_contract_routes_return_read_only_metadata_and_explicitly_withhel
     assert forecast.json()["availability"]["available"] is False
     assert forecast.json()["win_probability"]["reason"] == "win_probability_eligible_match_not_found"
     assert forecast.json()["uncertainty"]["reason"] == "uncertainty_eligible_match_not_found"
+    assert simulation.status_code == 200
+    assert simulation.json()["availability"]["available"] is False
 
 
 def test_website_tournament_delivery_excludes_unrecognised_and_prohibited_senior_categories() -> None:

@@ -9,6 +9,8 @@ This pack adds **read-only public contracts** and **staged internal structures**
 | Active competitors | `GET /api/v1/website/active-participants` | Requires confirmed single or pair identity plus a completed/retired match within 52 weeks in an approved senior scope. |
 | Brackets | `GET /api/v1/website/calendar/{calendar_entry_id}/brackets/{discipline}` | Withheld unless a captured direct PDF has a parser-validated, fully canonical-reconciled topology. |
 | Model readiness | `GET /api/v1/website/model-contract` | Describes availability and prerequisites for model, forecast, head-to-head, and simulation contracts without synthesising outcomes. |
+| Per-match forecast | `GET /api/v1/website/matches/{match_id}/forecast` | Returns an immutable published pre-match snapshot with typed values, or an independent availability reason for every forecast field. |
+| Tournament simulation | `GET /api/v1/website/calendar/{calendar_entry_id}/simulation` | Returns a published simulation only where the calendar entry has a safe canonical tournament link and a reconciled direct-BWF-draw topology. |
 
 ## Approved-senior boundary
 

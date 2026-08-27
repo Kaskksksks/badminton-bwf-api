@@ -319,3 +319,22 @@ class WebsiteMatchForecastResponse(ContractModel):
     uncertainty: ForecastFieldAvailability
     snapshot: WebsiteMatchForecastSnapshot | None = None
     meta: ApiMeta
+
+
+class WebsiteTournamentSimulationSnapshot(ContractModel):
+    calendar_entry_id: str
+    tournament_id: str
+    model_key: str
+    model_version: str
+    draw_topology_id: str
+    input_cutoff: datetime
+    simulation_count: int = Field(ge=1)
+    probability_payload: dict[str, object]
+    provenance: dict[str, object]
+
+
+class WebsiteTournamentSimulationResponse(ContractModel):
+    calendar_entry_id: str
+    availability: ContractAvailability
+    snapshot: WebsiteTournamentSimulationSnapshot | None = None
+    meta: ApiMeta
