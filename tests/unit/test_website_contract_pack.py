@@ -240,13 +240,18 @@ def test_website_player_directory_includes_all_confirmed_identities_not_only_cur
 
     app.dependency_overrides[get_db] = override_db
     try:
-        response = TestClient(app).get("/api/v1/website/players?page=1&page_size=10")
+        client = TestClient(app)
+        response = client.get("/api/v1/website/players?page=1&page_size=10")
+        searched = client.get("/api/v1/website/players?page=1&page_size=10&search=Stored")
     finally:
         app.dependency_overrides.clear()
 
     assert response.status_code == 200
     assert response.json()["pagination"]["total"] == 1
     assert response.json()["data"] == [{"id": confirmed.id, "full_name": "Stored Confirmed Player", "country_code": "JPN", "profile_url": None, "identity_status": "CONFIRMED"}]
+    assert searched.status_code == 200
+    assert searched.json()["pagination"]["total"] == 1
+    assert searched.json()["data"][0]["id"] == confirmed.id
 
 
 def test_public_contract_routes_return_read_only_metadata_and_explicitly_withheld_future_capabilities() -> None:

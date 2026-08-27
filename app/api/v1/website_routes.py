@@ -455,8 +455,12 @@ def list_players(
     session: Session = Depends(get_db),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
+    search: str | None = Query(None, min_length=2, max_length=100),
 ) -> WebsitePlayerListResponse:
     query = select(Player).where(Player.identity_status == "CONFIRMED")
+    normalized_search = " ".join(search.split()).lower() if search else ""
+    if normalized_search:
+        query = query.where(func.lower(Player.full_name).contains(normalized_search, autoescape=True))
     total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
     values = session.scalars(
         query.order_by(Player.full_name, Player.id)
