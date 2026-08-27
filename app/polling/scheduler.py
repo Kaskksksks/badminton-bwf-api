@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Mapping
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 JOB_ID = "bwf-sync"
 RANKINGS_JOB_ID = "bwf-rankings-weekly"
 CALENDAR_JOB_ID = "bwf-corporate-calendar"
+CALENDAR_DEFERRED_RETRY_JOB_ID = "bwf-corporate-calendar-deferred-retry"
+CALENDAR_DEFERRED_RETRY_SECONDS = 90
 
 
 def interval_for_sync_result(settings: Settings, result: Mapping[str, int | str]) -> tuple[int, str]:
@@ -66,12 +68,46 @@ def run_bwf_sync_job(scheduler: BackgroundScheduler | None = None) -> None:
             release_process_memory(reason="live_sync_complete")
 
 
-def run_bwf_corporate_calendar_job() -> None:
-    """Collect one bounded authorised calendar/draw unit without live-worker overlap."""
+def run_bwf_corporate_calendar_job(
+    scheduler: BackgroundScheduler | None = None,
+    deferred_retry: bool = False,
+) -> None:
+    """Collect one bounded authorised calendar/draw unit without live-worker overlap.
+
+    An initial startup collision with the immediate senior live-sync job is retried once
+    after a short delay. The retry never schedules another retry, preserving the normal
+    12-hour cadence and the existing global collection-slot boundary.
+    """
     settings = get_settings()
     with collection_slot("corporate_calendar") as acquired:
         if not acquired:
-            logger.info("bwf_corporate_calendar_deferred", extra={"reason": "collection_slot_unavailable"})
+            if scheduler is not None and not deferred_retry:
+                retry_at = datetime.now(timezone.utc) + timedelta(seconds=CALENDAR_DEFERRED_RETRY_SECONDS)
+                scheduler.add_job(
+                    run_bwf_corporate_calendar_job,
+                    trigger="date",
+                    run_date=retry_at,
+                    id=CALENDAR_DEFERRED_RETRY_JOB_ID,
+                    kwargs={"scheduler": scheduler, "deferred_retry": True},
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                )
+                logger.info(
+                    "bwf_corporate_calendar_deferred_retry_scheduled",
+                    extra={
+                        "reason": "collection_slot_unavailable",
+                        "retry_delay_seconds": CALENDAR_DEFERRED_RETRY_SECONDS,
+                    },
+                )
+            else:
+                logger.info(
+                    "bwf_corporate_calendar_deferred",
+                    extra={
+                        "reason": "collection_slot_unavailable",
+                        "deferred_retry": deferred_retry,
+                    },
+                )
             return
         try:
             with SessionLocal.begin() as session:
@@ -107,6 +143,7 @@ def build_scheduler() -> BackgroundScheduler:
             trigger="interval",
             hours=settings.bwf_calendar_refresh_hours,
             id=CALENDAR_JOB_ID,
+            kwargs={"scheduler": scheduler},
             replace_existing=True,
             max_instances=1,
             coalesce=True,

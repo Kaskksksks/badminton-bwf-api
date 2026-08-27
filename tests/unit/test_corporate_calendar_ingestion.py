@@ -345,6 +345,87 @@ def test_scheduler_includes_calendar_job_only_when_both_gates_are_enabled(monkey
     assert enabled_scheduler.get_job(scheduler_module.CALENDAR_JOB_ID) is not None
 
 
+def test_calendar_startup_lock_deferral_schedules_exactly_one_bounded_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+
+    from app.polling import scheduler as scheduler_module
+
+    class RecordingScheduler:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, dict[str, object]]] = []
+
+        def add_job(self, func: object, **kwargs: object) -> None:
+            self.calls.append((func, kwargs))
+
+    @contextmanager
+    def unavailable_slot(_collection_kind: str):
+        yield False
+
+    monkeypatch.setattr(scheduler_module, "get_settings", settings)
+    monkeypatch.setattr(scheduler_module, "collection_slot", unavailable_slot)
+    scheduler = RecordingScheduler()
+
+    scheduler_module.run_bwf_corporate_calendar_job(scheduler=scheduler)
+
+    assert len(scheduler.calls) == 1
+    function, kwargs = scheduler.calls[0]
+    assert function is scheduler_module.run_bwf_corporate_calendar_job
+    assert kwargs["trigger"] == "date"
+    assert kwargs["id"] == scheduler_module.CALENDAR_DEFERRED_RETRY_JOB_ID
+    assert kwargs["kwargs"] == {"scheduler": scheduler, "deferred_retry": True}
+    assert kwargs["replace_existing"] is True
+    assert kwargs["max_instances"] == 1
+
+
+def test_calendar_deferred_retry_does_not_schedule_another_retry_when_slot_remains_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+
+    from app.polling import scheduler as scheduler_module
+
+    class RecordingScheduler:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, dict[str, object]]] = []
+
+        def add_job(self, func: object, **kwargs: object) -> None:
+            self.calls.append((func, kwargs))
+
+    @contextmanager
+    def unavailable_slot(_collection_kind: str):
+        yield False
+
+    monkeypatch.setattr(scheduler_module, "get_settings", settings)
+    monkeypatch.setattr(scheduler_module, "collection_slot", unavailable_slot)
+    scheduler = RecordingScheduler()
+
+    scheduler_module.run_bwf_corporate_calendar_job(scheduler=scheduler, deferred_retry=True)
+
+    assert scheduler.calls == []
+
+
+def test_calendar_interval_job_passes_its_scheduler_for_single_deferred_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.polling import scheduler as scheduler_module
+
+    enabled = Settings(
+        bwf_calendar_enabled=True,
+        bwf_calendar_scheduler_enabled=True,
+        bwf_calendar_permission_reference="User-authorised BWF Corporate calendar and direct draw links",
+    )
+    monkeypatch.setattr(scheduler_module, "get_settings", lambda: enabled)
+
+    scheduler = scheduler_module.build_scheduler()
+    calendar_job = scheduler.get_job(scheduler_module.CALENDAR_JOB_ID)
+
+    assert calendar_job is not None
+    assert calendar_job.kwargs["scheduler"] is scheduler
+    assert calendar_job.kwargs.get("deferred_retry", False) is False
+
+
 def test_zero_draw_budget_never_fetches_a_document() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
