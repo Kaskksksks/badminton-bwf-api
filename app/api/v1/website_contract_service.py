@@ -165,11 +165,23 @@ def _approved_recent_contexts(session: Session, participant_ids: set[str], *, as
 
 def active_senior_participants(session: Session, *, page: int, page_size: int, as_of: date | None = None) -> tuple[list[SeniorParticipantContract], int]:
     as_of = as_of or datetime.now(timezone.utc).date()
+    cutoff = as_of - RECENT_ACTIVITY_WINDOW
+    candidate_ids = set(session.scalars(
+        select(MatchParticipantContext.participant_id)
+        .join(Match, Match.id == MatchParticipantContext.match_id)
+        .where(
+            Match.status.in_(COMPLETED_ACTIVITY_STATUSES),
+            Match.match_date >= cutoff,
+        )
+        .distinct()
+    ).all())
+    if not candidate_ids:
+        return [], 0
     # Legacy participant wrappers may remain unresolved even when every required
     # underlying player identity has been provider-confirmed. Public eligibility is
     # therefore based on complete confirmed membership plus approved recent context,
     # never on a name match or a partially resolved wrapper.
-    participants = session.scalars(select(Participant).order_by(Participant.display_name)).all()
+    participants = session.scalars(select(Participant).where(Participant.id.in_(candidate_ids)).order_by(Participant.display_name)).all()
     member_rows = session.scalars(select(ParticipantMember).where(ParticipantMember.participant_id.in_([item.id for item in participants]))).all() if participants else []
     member_ids: dict[str, list[str]] = {}
     for member in member_rows:
@@ -177,7 +189,7 @@ def active_senior_participants(session: Session, *, page: int, page_size: int, a
             member_ids.setdefault(member.participant_id, []).append(member.player_id)
     player_rows = session.scalars(select(Player).where(Player.id.in_({player_id for values in member_ids.values() for player_id in values}))).all() if member_ids else []
     players = {player.id: player for player in player_rows}
-    contexts = _approved_recent_contexts(session, {item.id for item in participants}, as_of=as_of)
+    contexts = _approved_recent_contexts(session, candidate_ids, as_of=as_of)
     active: list[SeniorParticipantContract] = []
     for participant in participants:
         resolved_members = member_ids.get(participant.id, [])
