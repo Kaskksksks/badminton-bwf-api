@@ -337,7 +337,20 @@ def get_player_statistics(player_id: str, session: DbSession) -> dict[str, Any]:
     activity = context_summary_for_player(session, player)
     if not activity.eligible_for_profile_search:
         return {"data": {"player_id": player_id, "statistics": [], "coverage": interval_coverage_summary(session), "activity_status": activity.activity_status, "trusted_statistics_eligible": False, "activity_evidence": activity.evidence()}, "meta": {**meta(), "notice": "Trusted player statistics are withheld until confirmed identity has a dated COMPLETED or RETIRED senior, non-Para official match within the prior 52 weeks."}}
-    return {"data": {"player_id": player_id, "statistics": [], "coverage": interval_coverage_summary(session), "activity_status": activity.activity_status, "trusted_statistics_eligible": True, "activity_evidence": activity.evidence()}, "meta": {**meta(), "notice": "Player statistics await resolved participant identity linkage and currently active official participation evidence."}}
+    participant_ids = sorted(set(session.scalars(
+        select(ParticipantMember.participant_id).where(ParticipantMember.player_id == player_id)
+    ).all()))
+    statistics = [
+        interval_metrics_for_participant(session, participant_id)
+        for participant_id in participant_ids
+    ]
+    published_statistics = [item for item in statistics if item["eligible_games"] > 0]
+    notice = (
+        "Statistics include only stored, coverage-eligible eleven-point interval assessments; missing observations are not estimated."
+        if published_statistics
+        else "No coverage-eligible eleven-point interval assessments are stored for this confirmed active player."
+    )
+    return {"data": {"player_id": player_id, "statistics": published_statistics, "coverage": interval_coverage_summary(session), "activity_status": activity.activity_status, "trusted_statistics_eligible": True, "activity_evidence": activity.evidence()}, "meta": {**meta("BWF_LIVE_DERIVED"), "notice": notice}}
 
 
 @router.get("/rankings")
