@@ -222,6 +222,33 @@ def test_confirmed_player_history_route_returns_bounded_approved_match_records()
     assert response.json()["data"][0]["participant_1"]["members"][0]["id"] == player_id
 
 
+def test_website_player_directory_includes_all_confirmed_identities_not_only_current_active_participants() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory.begin() as session:
+        confirmed = Player(full_name="Stored Confirmed Player", identity_status="CONFIRMED", country_code="JPN")
+        unresolved = Player(full_name="Unresolved Player", identity_status="UNRESOLVED", country_code="JPN")
+        session.add_all([confirmed, unresolved])
+
+    def override_db():
+        session = factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        response = TestClient(app).get("/api/v1/website/players?page=1&page_size=10")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["pagination"]["total"] == 1
+    assert response.json()["data"] == [{"id": confirmed.id, "full_name": "Stored Confirmed Player", "country_code": "JPN", "profile_url": None, "identity_status": "CONFIRMED"}]
+
+
 def test_public_contract_routes_return_read_only_metadata_and_explicitly_withheld_future_capabilities() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)

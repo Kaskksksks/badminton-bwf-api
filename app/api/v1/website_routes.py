@@ -456,11 +456,15 @@ def list_players(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
 ) -> WebsitePlayerListResponse:
-    active, total = active_senior_participants(session, page=page, page_size=page_size)
-    player_ids = {member_id for participant in active if participant.kind == "player" for member_id in participant.member_ids}
-    values = session.scalars(select(Player).where(Player.id.in_(player_ids)).order_by(Player.full_name)).all() if player_ids else []
+    query = select(Player).where(Player.identity_status == "CONFIRMED")
+    total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
+    values = session.scalars(
+        query.order_by(Player.full_name, Player.id)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
     data = [WebsitePlayer(id=value.id, full_name=value.full_name, country_code=value.country_code, profile_url=value.profile_url, identity_status=value.identity_status) for value in values]
-    return WebsitePlayerListResponse(data=data, pagination=PageInfo(page=page, page_size=page_size, total=total), meta=metadata("BWF_LIVE_AND_RESOLVED_IDENTITIES"))
+    return WebsitePlayerListResponse(data=data, pagination=PageInfo(page=page, page_size=page_size, total=total), meta=metadata("BWF_OFFICIAL_PLAYER_PROFILES"))
 
 
 @router.get("/rankings", response_model=WebsiteRankingListResponse)
