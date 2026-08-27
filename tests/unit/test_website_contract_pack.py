@@ -181,6 +181,47 @@ def test_public_match_route_accepts_typed_date_filters_without_database_errors()
     assert response.json()["data"][0]["id"]
 
 
+def test_confirmed_player_history_route_returns_bounded_approved_match_records() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory.begin() as session:
+        tournament = Tournament(name="Approved", source_name_raw="Approved", source_category_raw="BWF World Tour Super 500", status="ACTIVE")
+        session.add(tournament)
+        session.flush()
+        event = Event(tournament_id=tournament.id, event_type="WS", category="BWF World Tour Super 500")
+        player = Player(full_name="Confirmed Player", identity_status="CONFIRMED", country_code="JPN")
+        opponent = Player(full_name="Opponent", identity_status="CONFIRMED", country_code="KOR")
+        session.add_all([event, player, opponent])
+        session.flush()
+        first = Participant(participant_kind="PLAYER", canonical_member_hash="confirmed-player", display_name="Confirmed Player", identity_resolution_status="CONFIRMED")
+        second = Participant(participant_kind="PLAYER", canonical_member_hash="opponent", display_name="Opponent", identity_resolution_status="CONFIRMED")
+        session.add_all([first, second])
+        session.flush()
+        session.add_all([ParticipantMember(participant_id=first.id, player_id=player.id, member_order=1), ParticipantMember(participant_id=second.id, player_id=opponent.id, member_order=1)])
+        session.add(Match(source_match_key="test:confirmed-player-history", match_date=date(2026, 8, 24), tournament_id=tournament.id, event_id=event.id, status="COMPLETED", completion_basis="BWF_OFFICIAL_RESPONSE", participant_1_id=first.id, participant_2_id=second.id, winner_participant_id=first.id, score_raw="21-18 21-15"))
+        session.flush()
+        player_id = player.id
+
+    def override_db():
+        session = factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        response = TestClient(app).get(f"/api/v1/website/players/{player_id}/matches?scope=completed&page=1&page_size=10")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["pagination"] == {"page": 1, "page_size": 10, "total": 1}
+    assert response.json()["data"][0]["winner_participant_id"]
+    assert response.json()["data"][0]["participant_1"]["members"][0]["id"] == player_id
+
+
 def test_public_contract_routes_return_read_only_metadata_and_explicitly_withheld_future_capabilities() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)

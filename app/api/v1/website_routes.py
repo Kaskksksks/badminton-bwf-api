@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.base import get_db
@@ -247,6 +247,7 @@ def list_website_matches(
     to_date: date | None,
     page: int,
     page_size: int,
+    participant_ids: set[str] | None = None,
 ) -> WebsiteMatchListResponse:
     query = select(Match)
     if scope == "live":
@@ -273,6 +274,8 @@ def list_website_matches(
             meta=metadata("BWF_LIVE" if scope == "live" else "PLATFORM"),
         )
     query = query.where(Match.tournament_id.in_(allowed_ids))
+    if participant_ids:
+        query = query.where(or_(Match.participant_1_id.in_(participant_ids), Match.participant_2_id.in_(participant_ids)))
     total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
     values = session.scalars(
         query.order_by(Match.match_date.desc(), Match.actual_start_time.desc(), Match.id)
@@ -299,6 +302,24 @@ def list_matches(
     page_size: int = Query(50, ge=1, le=100),
 ) -> WebsiteMatchListResponse:
     return list_website_matches(session, scope, tournament_id, event_id, from_date, to_date, page, page_size)
+
+
+@router.get("/players/{player_id}/matches", response_model=WebsiteMatchListResponse)
+def list_confirmed_player_matches(
+    player_id: str,
+    session: Session = Depends(get_db),
+    scope: Literal["all", "live", "scheduled", "completed"] = Query("completed"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+) -> WebsiteMatchListResponse:
+    """Return bounded approved-scope history for one confirmed player through resolved participant membership."""
+    player = session.get(Player, player_id)
+    if player is None or player.identity_status != "CONFIRMED":
+        raise HTTPException(status_code=404, detail="Confirmed player not found")
+    participant_ids = set(session.scalars(
+        select(ParticipantMember.participant_id).where(ParticipantMember.player_id == player_id)
+    ).all())
+    return list_website_matches(session, scope, None, None, None, None, page, page_size, participant_ids)
 
 
 @router.get("/matches/{match_id}", response_model=WebsiteMatchResponse)
