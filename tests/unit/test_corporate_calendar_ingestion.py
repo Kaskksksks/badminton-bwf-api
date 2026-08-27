@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from pathlib import Path
+import re
 from typing import Any
 
 import httpx
@@ -75,6 +77,14 @@ def settings() -> Settings:
         bwf_draw_document_horizon_days=14,
         bwf_draw_document_max_per_run=4,
     )
+
+
+def test_calendar_migration_revision_fits_existing_alembic_version_column() -> None:
+    migration_path = Path(__file__).parents[2] / "alembic" / "versions" / "0004_bwf_corporate_calendar_draws.py"
+    match = re.search(r'^revision = "([^"]+)"$', migration_path.read_text(encoding="utf-8"), re.MULTILINE)
+
+    assert match is not None
+    assert len(match.group(1)) <= 32
 
 
 def test_parser_keeps_direct_draw_links_in_the_correct_event_context() -> None:

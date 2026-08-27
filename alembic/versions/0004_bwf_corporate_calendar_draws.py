@@ -1,6 +1,6 @@
 """Add authorised BWF Corporate calendar and draw document metadata.
 
-Revision ID: 0004_bwf_corporate_calendar_draws
+Revision ID: 0004_bwf_calendar_draws
 Revises: 0003_bwf_player_profile_identity
 Create Date: 2026-08-27
 """
@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0004_bwf_corporate_calendar_draws"
+revision = "0004_bwf_calendar_draws"
 down_revision = "0003_bwf_player_profile_identity"
 branch_labels = None
 depends_on = None
