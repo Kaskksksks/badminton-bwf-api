@@ -82,7 +82,7 @@ def test_active_pair_contract_requires_confirmed_members_and_recent_approved_sen
         first, second = Player(full_name="One", identity_status="CONFIRMED"), Player(full_name="Two", identity_status="CONFIRMED")
         session.add_all([event, first, second])
         session.flush()
-        pair = Participant(participant_kind="PAIR", canonical_member_hash="pair-hash", display_name="One / Two", identity_resolution_status="CONFIRMED")
+        pair = Participant(participant_kind="PAIR", canonical_member_hash="pair-hash", display_name="One / Two", identity_resolution_status="UNRESOLVED")
         session.add(pair)
         session.flush()
         session.add_all([ParticipantMember(participant_id=pair.id, player_id=first.id, member_order=1), ParticipantMember(participant_id=pair.id, player_id=second.id, member_order=2)])
@@ -97,6 +97,7 @@ def test_active_pair_contract_requires_confirmed_members_and_recent_approved_sen
     assert data[0].kind == "pair"
     assert data[0].member_ids == [first.id, second.id]
     assert data[0].recent_eligible_match_count == 1
+    assert "Every required underlying member is provider-confirmed" in data[0].eligibility_rationale
 
 
 def test_direct_draw_parser_stays_withheld_until_all_nodes_are_reconciled() -> None:

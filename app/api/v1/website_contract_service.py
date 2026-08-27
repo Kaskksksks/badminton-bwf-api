@@ -165,7 +165,11 @@ def _approved_recent_contexts(session: Session, participant_ids: set[str], *, as
 
 def active_senior_participants(session: Session, *, page: int, page_size: int, as_of: date | None = None) -> tuple[list[SeniorParticipantContract], int]:
     as_of = as_of or datetime.now(timezone.utc).date()
-    participants = session.scalars(select(Participant).where(Participant.identity_resolution_status == "CONFIRMED").order_by(Participant.display_name)).all()
+    # Legacy participant wrappers may remain unresolved even when every required
+    # underlying player identity has been provider-confirmed. Public eligibility is
+    # therefore based on complete confirmed membership plus approved recent context,
+    # never on a name match or a partially resolved wrapper.
+    participants = session.scalars(select(Participant).order_by(Participant.display_name)).all()
     member_rows = session.scalars(select(ParticipantMember).where(ParticipantMember.participant_id.in_([item.id for item in participants]))).all() if participants else []
     member_ids: dict[str, list[str]] = {}
     for member in member_rows:
@@ -193,7 +197,7 @@ def active_senior_participants(session: Session, *, page: int, page_size: int, a
             activity_status="ACTIVE_RECENT_OFFICIAL_PARTICIPATION",
             recent_eligible_match_count=len({match.id for match, _, _ in matches}),
             latest_eligible_match_date=latest.isoformat(),
-            eligibility_rationale="Confirmed identity with a dated COMPLETED or RETIRED match within 52 weeks in an approved senior competition category.",
+            eligibility_rationale="Every required underlying member is provider-confirmed and has a dated COMPLETED or RETIRED match within 52 weeks in an approved senior competition category.",
         ))
     return active[(page - 1) * page_size : page * page_size], len(active)
 
