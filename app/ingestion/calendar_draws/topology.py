@@ -39,6 +39,15 @@ DISCIPLINE_HEADINGS = {
 PARSER_VERSION = "bwf-direct-draw-topology-v1"
 ROUND_PATTERN = re.compile(r"^(?:round\s+of\s+)?(?:128|64|32|16|8|4)|quarter[- ]?final|semi[- ]?final|final$", re.IGNORECASE)
 PAIR_PATTERN = re.compile(r"^(?P<left>.+?)\s+(?:v(?:s\.?)?|–|—|-|\|)\s+(?P<right>.+?)$", re.IGNORECASE)
+TABLE_ENTRY_PATTERN = re.compile(
+    r"^\s*(?:(?P<position>\d+)\s+)?(?P<member_id>\d{4,})\s+(?P<country>[A-Z]{3})\s+(?P<label>.+?)\s*$"
+)
+PYPDF_POSITION_PATTERN = re.compile(r"^\s*(?P<position>\d+)\s+(?P<member_id>\d{4,})(?:\s+(?P<country>[A-Z]{3}))?\s*$")
+PYPDF_POSITION_ONLY_PATTERN = re.compile(r"^\s*(?P<position>\d+)\s*$")
+PYPDF_MEMBER_ID_PATTERN = re.compile(r"^\s*\d{4,}\s*$")
+PYPDF_COUNTRY_PATTERN = re.compile(r"^\s*[A-Z]{3}\s*$")
+PYPDF_LATER_ROUND_PATTERN = re.compile(r"^(?:Round\s+2|Quarterfinals|Semifinals|Final)$", re.IGNORECASE)
+PYPDF_BYE_PATTERN = re.compile(r"^bye(?:\s+\d+)?$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -98,7 +107,7 @@ def parse_direct_draw_text(extracted_text: str, *, discipline: str) -> list[Extr
         if not match:
             continue
         left, right = match.group("left").strip(), match.group("right").strip()
-        if len(left) < 2 or len(right) < 2 or left.casefold() == right.casefold():
+        if len(left) < 2 or len(right) < 2 or left.casefold() == right.casefold() or not re.search(r"[A-Za-z]", left) or not re.search(r"[A-Za-z]", right):
             continue
         nodes.append(
             ExtractedDrawNode(
@@ -109,7 +118,124 @@ def parse_direct_draw_text(extracted_text: str, *, discipline: str) -> list[Extr
                 participant_2_label=right,
             )
         )
-    return nodes
+    if nodes:
+        return nodes
+    return parse_table_draw_text(extracted_text, discipline=discipline)
+
+
+def _table_entries(extracted_text: str) -> list[tuple[int | None, str]]:
+    entries: list[tuple[int | None, str]] = []
+    for raw_line in extracted_text.splitlines():
+        match = TABLE_ENTRY_PATTERN.fullmatch(raw_line)
+        if not match:
+            continue
+        position = int(match.group("position")) if match.group("position") else None
+        label = match.group("label").strip()
+        if len(label) >= 2:
+            entries.append((position, label))
+    return entries
+
+
+def parse_table_draw_text(extracted_text: str, *, discipline: str) -> list[ExtractedDrawNode]:
+    """Stage Round 1 candidates from the explicit numbered roster table in a direct BWF PDF.
+
+    This recognises only ordered source rows, retains the source labels, and creates no winner
+    or advancement claims. It intentionally returns no candidates if the numbered positions are
+    incomplete or ambiguous. The resulting nodes remain ``PENDING_REVIEW`` until each receives
+    an explicit canonical-match reconciliation decision.
+    """
+
+    pypdf_participants = _pypdf_table_participants(extracted_text, discipline=discipline)
+    if pypdf_participants:
+        return _round_one_candidate_nodes(pypdf_participants, discipline=discipline)
+    entries = _table_entries(extracted_text)
+    participants: list[str] = []
+    if discipline in {"MS", "WS"}:
+        numbered = [(position, label) for position, label in entries if position is not None]
+        if not numbered or [position for position, _ in numbered] != list(range(1, len(numbered) + 1)):
+            return []
+        participants = [label for _, label in numbered]
+    else:
+        current_members: list[str] = []
+        expected_position = 1
+        for position, label in entries:
+            current_members.append(label)
+            if position is None:
+                continue
+            if position != expected_position or len(current_members) != 2:
+                return []
+            participants.append(" / ".join(current_members))
+            current_members = []
+            expected_position += 1
+        if current_members or not participants:
+            return []
+    return _round_one_candidate_nodes(participants, discipline=discipline)
+
+
+def _round_one_candidate_nodes(participants: list[str], *, discipline: str) -> list[ExtractedDrawNode]:
+    if len(participants) < 2 or len(participants) % 2:
+        return []
+    return [
+        ExtractedDrawNode(
+            source_node_key=f"{discipline}:table-round-1:{index // 2 + 1}",
+            round_label="Round 1 (source table)",
+            display_order=index // 2,
+            participant_1_label=participants[index],
+            participant_2_label=participants[index + 1],
+        )
+        for index in range(0, len(participants), 2)
+    ]
+
+
+def _pypdf_table_participants(extracted_text: str, *, discipline: str) -> list[str]:
+    """Read the source roster structure emitted by pypdf for BWF’s visual draw tables.
+
+    pypdf extracts visual columns as separate lines: a numbered member-id anchor, optional
+    second member id and country lines, then the display name(s). No names are joined across
+    positions. Candidates are rejected unless every source position is continuous from one.
+    """
+
+    expected_member_count = 1 if discipline in {"MS", "WS"} else 2
+    blocks: list[tuple[int, list[str]]] = []
+    current_position: int | None = None
+    current_lines: list[str] = []
+    for raw_line in extracted_text.splitlines():
+        line = raw_line.strip()
+        if current_position is not None and PYPDF_LATER_ROUND_PATTERN.fullmatch(line):
+            break
+        position_match = PYPDF_POSITION_PATTERN.fullmatch(line)
+        if position_match:
+            if current_position is not None:
+                blocks.append((current_position, current_lines))
+            current_position = int(position_match.group("position"))
+            current_lines = []
+            continue
+        position_only_match = PYPDF_POSITION_ONLY_PATTERN.fullmatch(line)
+        if position_only_match and int(position_only_match.group("position")) <= 128:
+            if current_position is not None:
+                blocks.append((current_position, current_lines))
+            current_position = int(position_only_match.group("position"))
+            current_lines = []
+            continue
+        if current_position is not None:
+            current_lines.append(line)
+    if current_position is not None:
+        blocks.append((current_position, current_lines))
+    if not blocks or [position for position, _ in blocks] != list(range(1, len(blocks) + 1)):
+        return []
+    participants: list[str] = []
+    for _, lines in blocks:
+        names = [
+            line for line in lines
+            if line and not PYPDF_MEMBER_ID_PATTERN.fullmatch(line) and not PYPDF_COUNTRY_PATTERN.fullmatch(line)
+        ]
+        if len(names) == 1 and PYPDF_BYE_PATTERN.fullmatch(names[0]):
+            participants.append("BYE")
+            continue
+        if len(names) != expected_member_count:
+            return []
+        participants.append(" / ".join(names))
+    return participants
 
 
 def stage_topology_from_extracted_text(
