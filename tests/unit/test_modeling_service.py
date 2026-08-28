@@ -93,7 +93,7 @@ def test_model_pipeline_publishes_evaluated_model_h2h_and_forecast():
     factory = make_session()
     with factory.begin() as session:
         tournament, participants, scheduled = add_fixture(session)
-        summary = run_model_pipeline(session, Settings(modeling_max_forecasts_per_run=10))
+        summary = run_model_pipeline(session, Settings(modeling_publication_approved=True, modeling_max_forecasts_per_run=10))
         model = session.scalar(select(ModelSnapshot).where(ModelSnapshot.model_status == "ACTIVE"))
         h2h = session.scalar(select(HeadToHeadSnapshot).where(HeadToHeadSnapshot.summary_status == "VALIDATED"))
         forecast = session.scalar(select(MatchForecastSnapshot).where(MatchForecastSnapshot.match_id == scheduled.id))
@@ -138,9 +138,23 @@ def test_model_pipeline_excludes_non_target_senior_tournament_history():
     factory = make_session()
     with factory.begin() as session:
         add_fixture(session, category="International Challenge")
-        summary = run_model_pipeline(session, Settings(modeling_max_forecasts_per_run=10))
+        summary = run_model_pipeline(session, Settings(modeling_publication_approved=True, modeling_max_forecasts_per_run=10))
         model = session.scalar(select(ModelSnapshot).where(ModelSnapshot.model_status == "ACTIVE"))
 
     assert summary["status"] == "insufficient_training_data"
     assert summary["training_matches"] == 0
     assert model is None
+
+
+def test_model_pipeline_never_publishes_from_an_unapproved_configuration() -> None:
+    factory = make_session()
+    with factory.begin() as session:
+        add_fixture(session)
+        summary = run_model_pipeline(session, Settings(modeling_max_forecasts_per_run=10))
+        model = session.scalar(select(ModelSnapshot))
+        forecast = session.scalar(select(MatchForecastSnapshot))
+
+    assert summary["status"] == "publication_not_approved"
+    assert summary["training_matches"] == 10
+    assert model is None
+    assert forecast is None

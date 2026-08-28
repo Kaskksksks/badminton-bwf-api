@@ -268,7 +268,14 @@ def _publish_h2h_snapshots(session: Session, confirmed_ids: set[str], matches: l
     return created
 
 
-def _publish_simulations(session: Session, model: ModelSnapshot, ratings: dict[str, float], settings: Settings) -> int:
+def _legacy_publish_independent_node_probabilities(session: Session, model: ModelSnapshot, ratings: dict[str, float], settings: Settings) -> int:
+    """Retained only as a non-public migration reference.
+
+    This routine calculates isolated node probabilities, not a bracket simulation:
+    it has no validated upstream/downstream node transition graph, Monte Carlo run
+    record, advancement distribution, or post-result re-simulation lineage. It
+    must not be used to publish a tournament simulation.
+    """
     rows = session.execute(
         select(OfficialDrawTopology, OfficialTournamentDocument, OfficialTournamentCalendarEntry, Tournament)
         .join(OfficialTournamentDocument, OfficialTournamentDocument.id == OfficialDrawTopology.document_id)
@@ -332,11 +339,28 @@ def _publish_simulations(session: Session, model: ModelSnapshot, ratings: dict[s
     return created
 
 
+def _publish_simulations(session: Session, model: ModelSnapshot, ratings: dict[str, float], settings: Settings) -> int:
+    """Fail closed until an approved topology-transition and Monte Carlo contract exists."""
+
+    # The schema preserves a simulation snapshot boundary, but the current draw
+    # parser yields reviewable source nodes rather than a verified directed bracket
+    # graph. Publishing independent node probabilities as advancement chances would
+    # be misleading, so this producer intentionally writes no simulation output.
+    return 0
+
+
 def run_model_pipeline(session: Session, settings: Settings | None = None) -> dict[str, int | str]:
     """Train/evaluate and publish only outputs whose evidence prerequisites are satisfied."""
+
     settings = settings or get_settings()
     confirmed_ids = _confirmed_participant_ids(session)
     matches = _training_matches(session, confirmed_ids)
+    if not settings.modeling_publication_approved:
+        return {
+            "status": "publication_not_approved",
+            "confirmed_participants": len(confirmed_ids),
+            "training_matches": len(matches),
+        }
     ratings, evaluation = _evaluate_and_fit(matches)
     model = _upsert_model(session, matches, ratings, evaluation)
     if model is None:

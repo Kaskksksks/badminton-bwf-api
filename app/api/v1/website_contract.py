@@ -255,6 +255,26 @@ class SeniorParticipantListResponse(ContractModel):
     meta: ApiMeta
 
 
+class WebsiteHeadToHeadSnapshot(ContractModel):
+    """A stored eligible meeting summary, never a browser-generated forecast."""
+
+    participant_a_id: str
+    participant_b_id: str
+    input_cutoff: datetime
+    eligible_meetings: int = Field(ge=1)
+    participant_a_wins: int = Field(ge=0)
+    participant_b_wins: int = Field(ge=0)
+    evidence: dict[str, object]
+
+
+class WebsiteHeadToHeadResponse(ContractModel):
+    participant_a_id: str
+    participant_b_id: str
+    availability: ContractAvailability
+    snapshot: WebsiteHeadToHeadSnapshot | None = None
+    meta: ApiMeta
+
+
 class ContractAvailability(ContractModel):
     available: bool
     reason: str

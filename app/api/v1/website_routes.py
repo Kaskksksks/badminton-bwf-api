@@ -20,6 +20,8 @@ from app.db.models import (
     Player,
     RankingEntry,
     RankingSnapshot,
+    OfficialTournamentCalendarEntry,
+    OfficialTournamentDocument,
     Tournament,
     TournamentClassification,
 )
@@ -49,11 +51,12 @@ from app.api.v1.website_contract import (
     SeniorParticipantListResponse,
     WebsiteCalendarListResponse,
     WebsiteDrawDocumentListResponse,
+    WebsiteHeadToHeadResponse,
     ForecastFieldAvailability,
     WebsiteMatchForecastResponse,
     WebsiteTournamentSimulationResponse,
 )
-from app.api.v1.website_contract_service import active_senior_participants, approved_tournament_ids, calendar_entries, draw_documents, match_forecast_snapshot, model_contract, official_bracket, tournament_simulation_snapshot
+from app.api.v1.website_contract_service import active_senior_participants, approved_tournament_ids, calendar_entries, draw_documents, head_to_head_snapshot, match_forecast_snapshot, model_contract, official_bracket, tournament_simulation_snapshot
 from app.modeling.service import model_readiness
 
 router = APIRouter(prefix="/website", tags=["website-integration"])
@@ -407,6 +410,27 @@ def list_active_participants(
     return SeniorParticipantListResponse(data=data, pagination=PageInfo(page=page, page_size=page_size, total=total), meta=metadata("BWF_LIVE_AND_RESOLVED_IDENTITIES"))
 
 
+@router.get("/head-to-head", response_model=WebsiteHeadToHeadResponse)
+def get_head_to_head(
+    participant_a_id: str = Query(min_length=1, max_length=36),
+    participant_b_id: str = Query(min_length=1, max_length=36),
+    session: Session = Depends(get_db),
+) -> WebsiteHeadToHeadResponse:
+    """Return an evidence-backed H2H summary only; never compute a client-side forecast."""
+    availability, snapshot = head_to_head_snapshot(
+        session,
+        participant_a_id=participant_a_id,
+        participant_b_id=participant_b_id,
+    )
+    return WebsiteHeadToHeadResponse(
+        participant_a_id=participant_a_id,
+        participant_b_id=participant_b_id,
+        availability=availability,
+        snapshot=snapshot,
+        meta=metadata("PLATFORM_MODEL"),
+    )
+
+
 @router.get("/calendar/{calendar_entry_id}/brackets/{discipline}", response_model=OfficialBracketResponse)
 def get_official_bracket(
     calendar_entry_id: str,
@@ -546,11 +570,34 @@ def list_rankings(
 
 @router.get("/capabilities", response_model=CapabilityResponse)
 def capabilities(session: Session = Depends(get_db)) -> CapabilityResponse:
-    rankings_available = bool(session.scalar(select(func.count()).select_from(RankingSnapshot)))
+    rankings_available = bool(session.scalar(
+        select(func.count()).select_from(RankingSnapshot).where(
+            RankingSnapshot.population == "SENIOR",
+            RankingSnapshot.snapshot_status == "COMPLETE",
+        )
+    ))
+    eligible_calendar_count = session.scalar(
+        select(func.count()).select_from(OfficialTournamentCalendarEntry).where(
+            OfficialTournamentCalendarEntry.eligibility_status == "ELIGIBLE"
+        )
+    ) or 0
+    eligible_document_count = session.scalar(
+        select(func.count())
+        .select_from(OfficialTournamentDocument)
+        .join(
+            OfficialTournamentCalendarEntry,
+            OfficialTournamentCalendarEntry.id == OfficialTournamentDocument.calendar_entry_id,
+        )
+        .where(OfficialTournamentCalendarEntry.eligibility_status == "ELIGIBLE")
+    ) or 0
+    _, active_participant_count = active_senior_participants(session, page=1, page_size=1)
     contracts = model_contract(session)
     return CapabilityResponse(
         data={
-            "rankings": ({"available": True, "source": "BWF_OFFICIAL_RANKINGS"} if rankings_available else {"available": False, "reason": "not_yet_ingested"}),
+            "calendar": ({"available": True, "source": "BWF_CORPORATE_CALENDAR", "eligible_record_count": eligible_calendar_count, "read_only": True} if eligible_calendar_count else {"available": False, "reason": "no_eligible_calendar_entries_persisted", "eligible_record_count": 0, "read_only": True}),
+            "draw_documents": ({"available": True, "source": "BWF_CORPORATE_CALENDAR", "eligible_record_count": eligible_document_count, "read_only": True} if eligible_document_count else {"available": False, "reason": "no_eligible_direct_draw_documents_persisted", "eligible_record_count": 0, "read_only": True}),
+            "active_participants": ({"available": True, "source": "BWF_LIVE_AND_RESOLVED_IDENTITIES", "eligible_record_count": active_participant_count} if active_participant_count else {"available": False, "reason": "no_confirmed_active_senior_participants", "eligible_record_count": 0}),
+            "rankings": ({"available": True, "source": "BWF_OFFICIAL_RANKINGS"} if rankings_available else {"available": False, "reason": "no_complete_senior_ranking_snapshot"}),
             "draws": {"available": False, "reason": "official_draw_topology_not_yet_validated_and_reconciled"},
             "point_events": {"available": False, "reason": "not_exposed_by_provider"},
             "predictions": contracts["predictions"].model_dump(),

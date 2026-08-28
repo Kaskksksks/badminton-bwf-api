@@ -91,6 +91,10 @@ class Settings(BaseSettings):
     # model output unless the required confirmed identities and validated match
     # history are present.
     modeling_scheduler_enabled: bool = False
+    # A separately reviewed real-data validation report must explicitly approve
+    # publication. The safe default prevents a development baseline from becoming
+    # a public sporting forecast merely because a scheduler is enabled.
+    modeling_publication_approved: bool = False
     modeling_refresh_hours: int = Field(default=24, ge=6, le=168)
     modeling_max_forecasts_per_run: int = Field(default=5000, ge=1, le=20000)
     modeling_simulation_count: int = Field(default=1000, ge=100, le=100000)

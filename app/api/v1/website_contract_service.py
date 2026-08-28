@@ -14,6 +14,7 @@ from app.api.v1.website_contract import (
     WebsiteTournamentSimulationSnapshot,
     OfficialBracketNode,
     SeniorParticipantContract,
+    WebsiteHeadToHeadSnapshot,
     WebsiteCalendarEntry,
     WebsiteDrawDocument,
 )
@@ -214,18 +215,109 @@ def active_senior_participants(session: Session, *, page: int, page_size: int, a
     return active[(page - 1) * page_size : page * page_size], len(active)
 
 
+def _active_senior_participant_contract(
+    session: Session, participant_id: str, *, as_of: date
+) -> SeniorParticipantContract | None:
+    """Apply the same current-senior gate to one requested Head-to-Head subject.
+
+    This deliberately repeats the membership and approved-context checks rather than
+    accepting a name or an old HeadToHeadSnapshot as proof of present eligibility.
+    """
+
+    participant = session.get(Participant, participant_id)
+    if participant is None:
+        return None
+    members = session.scalars(
+        select(ParticipantMember).where(ParticipantMember.participant_id == participant.id)
+    ).all()
+    expected_members = 2 if participant.participant_kind == "PAIR" else 1
+    if len(members) != expected_members or any(member.player_id is None for member in members):
+        return None
+    player_ids = [member.player_id for member in members if member.player_id]
+    players = {
+        player.id: player
+        for player in session.scalars(select(Player).where(Player.id.in_(player_ids))).all()
+    }
+    if len(players) != expected_members or any(
+        players[player_id].identity_status != "CONFIRMED" for player_id in player_ids
+    ):
+        return None
+    contexts = _approved_recent_contexts(session, {participant.id}, as_of=as_of).get(participant.id, [])
+    if not contexts:
+        return None
+    latest = max(match.match_date for match, _, _ in contexts if match.match_date is not None)
+    return SeniorParticipantContract(
+        id=participant.id,
+        kind="pair" if participant.participant_kind == "PAIR" else "player",
+        display_name=participant.display_name,
+        member_ids=player_ids,
+        identity_status="CONFIRMED",
+        activity_status="ACTIVE_RECENT_OFFICIAL_PARTICIPATION",
+        recent_eligible_match_count=len({match.id for match, _, _ in contexts}),
+        latest_eligible_match_date=latest.isoformat(),
+        eligibility_rationale="Every required underlying member is provider-confirmed and has a dated COMPLETED or RETIRED match within 52 weeks in an approved senior competition category.",
+    )
+
+
+def head_to_head_snapshot(
+    session: Session, *, participant_a_id: str, participant_b_id: str, as_of: date | None = None
+) -> tuple[ContractAvailability, WebsiteHeadToHeadSnapshot | None]:
+    """Return only a persisted, current-senior, validation-backed H2H summary.
+
+    No probability, scoreline, or forecast is calculated in this read path. Both
+    requested subjects must independently pass the active-senior contract today.
+    """
+
+    prerequisites = [
+        "two distinct confirmed active senior participants or verified current pairs",
+        "dated completed or retired matches within the prior 52 weeks in approved senior scope",
+        "stored validated head-to-head summary with source evidence",
+    ]
+    if participant_a_id == participant_b_id:
+        return ContractAvailability(available=False, reason="distinct_participants_required", prerequisites=prerequisites, eligible_record_count=0), None
+    today = as_of or datetime.now(timezone.utc).date()
+    if not _active_senior_participant_contract(session, participant_a_id, as_of=today) or not _active_senior_participant_contract(session, participant_b_id, as_of=today):
+        return ContractAvailability(available=False, reason="active_senior_participant_required", prerequisites=prerequisites, eligible_record_count=0), None
+    stored_a, stored_b = sorted((participant_a_id, participant_b_id))
+    snapshot = session.scalar(
+        select(HeadToHeadSnapshot)
+        .where(
+            HeadToHeadSnapshot.participant_a_id == stored_a,
+            HeadToHeadSnapshot.participant_b_id == stored_b,
+            HeadToHeadSnapshot.summary_status == "VALIDATED",
+        )
+        .order_by(HeadToHeadSnapshot.input_cutoff.desc(), HeadToHeadSnapshot.created_at.desc())
+    )
+    if snapshot is None:
+        return ContractAvailability(available=False, reason="no_validated_head_to_head_snapshot", prerequisites=prerequisites, eligible_record_count=0), None
+    if snapshot.eligible_meetings < 1 or snapshot.participant_a_wins + snapshot.participant_b_wins != snapshot.eligible_meetings:
+        return ContractAvailability(available=False, reason="head_to_head_snapshot_invariant_failed", prerequisites=prerequisites, eligible_record_count=0), None
+    if participant_a_id == stored_a:
+        a_wins, b_wins = snapshot.participant_a_wins, snapshot.participant_b_wins
+    else:
+        a_wins, b_wins = snapshot.participant_b_wins, snapshot.participant_a_wins
+    return ContractAvailability(available=True, reason="validated_active_senior_head_to_head_snapshot", prerequisites=prerequisites, eligible_record_count=snapshot.eligible_meetings), WebsiteHeadToHeadSnapshot(
+        participant_a_id=participant_a_id,
+        participant_b_id=participant_b_id,
+        input_cutoff=snapshot.input_cutoff,
+        eligible_meetings=snapshot.eligible_meetings,
+        participant_a_wins=a_wins,
+        participant_b_wins=b_wins,
+        evidence=snapshot.evidence,
+    )
+
+
 def model_contract(session: Session) -> dict[str, ContractAvailability]:
     active_models = session.scalars(select(ModelSnapshot).where(ModelSnapshot.model_status == "ACTIVE", ModelSnapshot.calibration_status == "EVALUATED")).all()
     models_ready = [item for item in active_models if item.training_cutoff and item.evaluation_summary is not None and item.activated_at]
     h2h_count = session.scalar(select(func.count()).select_from(HeadToHeadSnapshot).where(HeadToHeadSnapshot.summary_status == "VALIDATED")) or 0
     forecast_count = session.scalar(select(func.count()).select_from(MatchForecastSnapshot).where(MatchForecastSnapshot.forecast_status == "PUBLISHED")) or 0
-    simulation_count = session.scalar(select(func.count()).select_from(TournamentSimulationSnapshot).where(TournamentSimulationSnapshot.simulation_status == "PUBLISHED")) or 0
     prerequisites = ["approved senior-only source scope", "confirmed participant identity", "timestamped input cutoff", "versioned methodology", "validated source provenance"]
     return {
         "model": ContractAvailability(available=bool(models_ready), reason="active_validated_model_available" if models_ready else "no_active_evaluated_model_snapshot", prerequisites=prerequisites + ["calibration and accuracy evaluation"], eligible_record_count=len(models_ready)),
         "predictions": ContractAvailability(available=bool(models_ready and forecast_count), reason="published_pre_match_forecasts_available" if models_ready and forecast_count else "no_published_pre_match_forecast_snapshot", prerequisites=prerequisites + ["active evaluated model", "pre-match generated forecast", "probabilities summing to 10,000 basis points"], eligible_record_count=forecast_count),
         "head_to_head": ContractAvailability(available=bool(h2h_count), reason="validated_head_to_head_available" if h2h_count else "no_validated_head_to_head_snapshot", prerequisites=prerequisites + ["pair of confirmed active participants", "eligible completed match history"], eligible_record_count=h2h_count),
-        "simulations": ContractAvailability(available=bool(models_ready and simulation_count), reason="published_tournament_simulation_available" if models_ready and simulation_count else "no_published_tournament_simulation_snapshot", prerequisites=prerequisites + ["published official draw topology", "validated reconciliation to canonical matches", "active evaluated model"], eligible_record_count=simulation_count),
+        "simulations": ContractAvailability(available=False, reason="bracket_transition_topology_and_monte_carlo_contract_not_yet_implemented", prerequisites=prerequisites + ["published directed official draw topology", "validated reconciliation to canonical matches", "active evaluated model", "versioned Monte Carlo advancement run"], eligible_record_count=0),
     }
 
 
@@ -242,6 +334,8 @@ def match_forecast_snapshot(session: Session, match_id: str) -> tuple[ContractAv
     ]
     if match is None or not match.tournament_id or match.tournament_id not in approved_tournament_ids(session, {match.tournament_id}):
         return ContractAvailability(available=False, reason="eligible_match_not_found", prerequisites=prerequisites, eligible_record_count=0), None
+    if match.status in {"COMPLETED", "HISTORICAL_PARTIAL", "RETIRED", "WALKOVER"} or match.winner_participant_id is not None:
+        return ContractAvailability(available=False, reason="official_result_available_prediction_is_historical_audit_only", prerequisites=prerequisites, eligible_record_count=0), None
     row = session.execute(
         select(MatchForecastSnapshot, ModelSnapshot)
         .join(ModelSnapshot, ModelSnapshot.id == MatchForecastSnapshot.model_snapshot_id)
@@ -286,6 +380,12 @@ def tournament_simulation_snapshot(session: Session, calendar_entry_id: str) -> 
     entry = session.get(OfficialTournamentCalendarEntry, calendar_entry_id)
     if entry is None or entry.eligibility_status != "ELIGIBLE":
         return ContractAvailability(available=False, reason="eligible_calendar_entry_not_found", prerequisites=prerequisites, eligible_record_count=0), None
+    return ContractAvailability(
+        available=False,
+        reason="bracket_transition_topology_and_monte_carlo_contract_not_yet_implemented",
+        prerequisites=prerequisites + ["verified directed topology transitions", "versioned Monte Carlo advancement outputs"],
+        eligible_record_count=0,
+    ), None
     tournaments = session.scalars(select(Tournament).where(Tournament.source_url == entry.source_url)).all() if entry.source_url else []
     eligible_tournaments = [item for item in tournaments if item.id in approved_tournament_ids(session, {item.id for item in tournaments})]
     if len(eligible_tournaments) != 1:

@@ -7,11 +7,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.api.v1.website_contract_service import active_senior_participants, calendar_entries, draw_documents, model_contract, official_bracket, tournament_simulation_snapshot
+from app.api.v1.website_contract_service import active_senior_participants, calendar_entries, draw_documents, head_to_head_snapshot, match_forecast_snapshot, model_contract, official_bracket, tournament_simulation_snapshot
 from app.db.base import Base, get_db
 from app.db.models import (
     DataSource,
     Event,
+    HeadToHeadSnapshot,
     Match,
     MatchParticipantContext,
     OfficialTournamentCalendarEntry,
@@ -100,6 +101,69 @@ def test_active_pair_contract_requires_confirmed_members_and_recent_approved_sen
     assert "Every required underlying member is provider-confirmed" in data[0].eligibility_rationale
 
 
+def test_website_head_to_head_requires_active_confirmed_subjects_and_preserves_requested_order() -> None:
+    factory = session_factory()
+    with factory.begin() as session:
+        tournament = Tournament(name="BWF World Tour Super 500", source_name_raw="BWF World Tour Super 500", source_category_raw="BWF World Tour Super 500", status="ACTIVE")
+        session.add(tournament)
+        session.flush()
+        event = Event(tournament_id=tournament.id, event_type="MS", category="BWF World Tour Super 500")
+        first, second = Player(full_name="First", identity_status="CONFIRMED"), Player(full_name="Second", identity_status="CONFIRMED")
+        session.add_all([event, first, second])
+        session.flush()
+        a = Participant(participant_kind="SINGLES", canonical_member_hash="first", display_name="First", identity_resolution_status="CONFIRMED")
+        b = Participant(participant_kind="SINGLES", canonical_member_hash="second", display_name="Second", identity_resolution_status="CONFIRMED")
+        session.add_all([a, b])
+        session.flush()
+        session.add_all([
+            ParticipantMember(participant_id=a.id, player_id=first.id, member_order=1),
+            ParticipantMember(participant_id=b.id, player_id=second.id, member_order=1),
+        ])
+        match = Match(source_match_key="test:h2h-active", match_date=date.today(), tournament_id=tournament.id, event_id=event.id, status="COMPLETED", participant_1_id=a.id, participant_2_id=b.id, winner_participant_id=a.id, score_validation_status="VALID", completion_basis="BWF_OFFICIAL_RESPONSE")
+        session.add(match)
+        session.flush()
+        session.add_all([
+            MatchParticipantContext(match_id=match.id, participant_id=a.id, side=1),
+            MatchParticipantContext(match_id=match.id, participant_id=b.id, side=2),
+        ])
+        stored_a, stored_b = sorted((a.id, b.id))
+        session.add(HeadToHeadSnapshot(
+            participant_a_id=stored_a,
+            participant_b_id=stored_b,
+            input_cutoff=datetime(2026, 8, 27, tzinfo=timezone.utc),
+            summary_status="VALIDATED",
+            eligible_meetings=1,
+            participant_a_wins=1 if stored_a == a.id else 0,
+            participant_b_wins=1 if stored_b == a.id else 0,
+            evidence={"match_ids": [match.id]},
+        ))
+        session.flush()
+        availability, snapshot = head_to_head_snapshot(session, participant_a_id=b.id, participant_b_id=a.id)
+
+    assert availability.available is True
+    assert snapshot is not None
+    assert snapshot.participant_a_id == b.id
+    assert snapshot.participant_b_id == a.id
+    assert snapshot.participant_a_wins == 0
+    assert snapshot.participant_b_wins == 1
+
+
+def test_website_forecast_withholds_display_once_an_official_result_exists() -> None:
+    factory = session_factory()
+    with factory.begin() as session:
+        tournament = Tournament(name="BWF World Tour Super 500", source_name_raw="BWF World Tour Super 500", source_category_raw="BWF World Tour Super 500", status="COMPLETED")
+        session.add(tournament)
+        session.flush()
+        match = Match(source_match_key="test:result-precedence", match_date=date.today(), tournament_id=tournament.id, status="COMPLETED", winner_participant_id="stored-winner", completion_basis="BWF_OFFICIAL_RESPONSE")
+        session.add(match)
+        session.flush()
+        availability, snapshot = match_forecast_snapshot(session, match.id)
+
+    assert availability.available is False
+    assert availability.reason == "official_result_available_prediction_is_historical_audit_only"
+    assert snapshot is None
+
+
 def test_direct_draw_parser_stays_withheld_until_all_nodes_are_reconciled() -> None:
     factory = session_factory()
     with factory.begin() as session:
@@ -137,6 +201,7 @@ def test_model_contracts_are_withheld_without_real_evidence() -> None:
     assert contract["predictions"].reason == "no_published_pre_match_forecast_snapshot"
     assert contract["head_to_head"].available is False
     assert contract["simulations"].available is False
+    assert contract["simulations"].reason == "bracket_transition_topology_and_monte_carlo_contract_not_yet_implemented"
 
 
 def test_tournament_simulation_contract_requires_a_canonical_calendar_link_and_published_reconciled_snapshot() -> None:
@@ -146,7 +211,7 @@ def test_tournament_simulation_contract_requires_a_canonical_calendar_link_and_p
         availability, snapshot = tournament_simulation_snapshot(session, entry.id)
 
     assert availability.available is False
-    assert availability.reason == "canonical_tournament_link_not_available"
+    assert availability.reason == "bracket_transition_topology_and_monte_carlo_contract_not_yet_implemented"
     assert snapshot is None
 
 
@@ -282,6 +347,7 @@ def test_public_contract_routes_return_read_only_metadata_and_explicitly_withhel
         readiness = client.get("/api/v1/website/model-contract")
         forecast = client.get("/api/v1/website/matches/not-a-match/forecast")
         simulation = client.get(f"/api/v1/website/calendar/{entry_id}/simulation")
+        capabilities = client.get("/api/v1/website/capabilities")
     finally:
         app.dependency_overrides.clear()
 
@@ -303,6 +369,21 @@ def test_public_contract_routes_return_read_only_metadata_and_explicitly_withhel
     assert forecast.json()["uncertainty"]["reason"] == "uncertainty_eligible_match_not_found"
     assert simulation.status_code == 200
     assert simulation.json()["availability"]["available"] is False
+    assert capabilities.status_code == 200
+    assert capabilities.json()["data"]["calendar"] == {
+        "available": True,
+        "source": "BWF_CORPORATE_CALENDAR",
+        "eligible_record_count": 1,
+        "read_only": True,
+    }
+    assert capabilities.json()["data"]["draw_documents"] == {
+        "available": True,
+        "source": "BWF_CORPORATE_CALENDAR",
+        "eligible_record_count": 1,
+        "read_only": True,
+    }
+    assert capabilities.json()["data"]["active_participants"]["available"] is False
+    assert capabilities.json()["data"]["rankings"] == {"available": False, "reason": "no_complete_senior_ranking_snapshot"}
 
 
 def test_website_tournament_delivery_excludes_unrecognised_and_prohibited_senior_categories() -> None:
