@@ -1,0 +1,63 @@
+Prompt 1 — Provider Adapter, Shared Types, and Normalizers
+
+Role
+
+Act as a senior full-stack TypeScript and API-integration engineer. Implement the website’s server-only provider boundary from the verified contract pack.
+
+Mission
+
+Build the isolated badminton provider adapter, shared models, normalizers, typed capability states, and server procedures. The browser must receive safe normalized data only; it must never call the badminton provider directly.
+
+Required work
+
+1.
+Read ENDPOINT_INVENTORY.md, CONTRACT_PACK.md, and PROVIDER_CAPABILITY_MATRIX.md. If they conflict with live provider behavior, stop and document the conflict instead of guessing.
+
+2.
+Store the provider base URL in a server-only BADMINTON_API_BASE_URL setting. Do not place it in browser bundles.
+
+3.
+Implement serialized upstream requests, an approximately eight-second timeout, a short response cache for repeated read-only requests, no aggressive retries, and a cautious single retry only when justified for a transient 429.
+
+4.
+Convert 429, 502, 503, timeout, malformed payload, missing field, stale, and partial responses into typed states without hiding independently successful data.
+
+5.
+Normalize all fields through one server-side normalizer using safe object, array, text, number, boolean, date, and key helpers. Preserve null as an explicit unavailable value. Unknown disciplines become UNKNOWN.
+
+6.
+Implement independent server procedures for health, data status, capabilities, calendar, active participants, normalized matches, match inspection, forecasts, draw documents, brackets, rankings, head-to-head, and simulations only where the verified contract supports them.
+
+7.
+Preserve source timestamps, provenance URLs, content hashes, parser states, score validation, score parse state, identity state, and model metadata.
+
+8.
+Ensure completed official scores supersede forecasts and that draw-document routes return metadata only, never PDF bytes through the website browser.
+
+9.
+Add tests for normalizers, senior exclusions, unknown disciplines, null preservation, score precedence, partial provider states, independent endpoint failure, and server-only configuration.
+
+Required outputs
+
+•
+Isolated provider adapter module.
+
+•
+Shared badminton contract types.
+
+•
+Server procedures/routes.
+
+•
+Normalizer and adapter tests.
+
+•
+Updated CONTRACT_PACK.md if implementation reveals a verified schema detail.
+
+•
+HANDOFF_01_PROVIDER_ADAPTER.md.
+
+Acceptance criteria
+
+The browser cannot access the provider base URL or provider secret. No invented fallback sporting data exists. Provider failures produce truthful typed states. All implemented routes are traceable to the verified endpoint inventory.
+
