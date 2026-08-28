@@ -235,6 +235,45 @@ def capture_draw_document(
     return True
 
 
+def parse_captured_draw_document(
+    session: Session,
+    *,
+    document_id: str,
+    client: BWFCorporateCalendarClient,
+    settings: Settings | None = None,
+) -> dict[str, object]:
+    """Re-fetch one already captured PDF, verify its immutable hash, and stage candidates."""
+    settings = settings or get_settings()
+    stored = session.get(OfficialTournamentDocument, document_id)
+    if stored is None:
+        raise ValueError("Official draw document not found")
+    response = client.fetch_draw_document(stored.source_url)
+    if response.content_hash != stored.content_hash:
+        raise ValueError("The source PDF changed since capture; a new document snapshot is required")
+    extracted_text = extract_direct_draw_text(response.content)
+    sections = discipline_sections(extracted_text)
+    topologies: list[dict[str, object]] = []
+    for discipline, section_text in sections.items():
+        node_count = len(parse_direct_draw_text(section_text, discipline=discipline))
+        if not node_count:
+            continue
+        topology = stage_topology_from_extracted_text(
+            session,
+            document_id=stored.id,
+            discipline=discipline,
+            source_content_hash=stored.content_hash,
+            extracted_text=section_text,
+        )
+        topologies.append({"topology_id": topology.id, "discipline": discipline, "node_count": node_count, "topology_status": topology.topology_status})
+    stored.parser_status = "PARSED_REVIEW_REQUIRED" if topologies else "PARSE_EMPTY"
+    stored.parser_issue = (
+        f"Staged {len(topologies)} discipline topology candidate(s); explicit canonical reconciliation is still required."
+        if topologies else "PDF text extraction produced no explicit discipline draw nodes."
+    )
+    session.flush()
+    return {"document_id": stored.id, "parser_status": stored.parser_status, "topologies": topologies}
+
+
 def synchronize_corporate_calendar(
     session: Session,
     *,

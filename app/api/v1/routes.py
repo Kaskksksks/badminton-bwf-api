@@ -16,6 +16,9 @@ from app.db.models import (
     GameStateObservation,
     HeadToHeadSnapshot,
     ImportBatch,
+    OfficialDrawNode,
+    OfficialDrawNodeReconciliation,
+    OfficialDrawTopology,
     Match,
     MatchGame,
     Participant,
@@ -646,6 +649,30 @@ def run_modeling_now(session: DbSession) -> dict[str, Any]:
     return {"data": summary, "meta": meta("PLATFORM_MODEL")}
 
 
+@router.post("/admin/draws/documents/{document_id}/collect-and-parse", dependencies=[Depends(require_admin)])
+def collect_and_parse_draw_document(document_id: str, session: DbSession) -> dict[str, Any]:
+    """Re-fetch the exact captured PDF, verify its hash, and stage all parseable disciplines."""
+    from app.ingestion.calendar_draws.client import BWFCorporateCalendarClient
+    from app.ingestion.calendar_draws.service import parse_captured_draw_document
+
+    settings = get_settings()
+    if settings.bwf_calendar_permission_required and not settings.bwf_calendar_permission_reference:
+        raise HTTPException(status_code=409, detail="BWF Corporate calendar permission reference is not configured")
+    with collection_slot("draw_reparse") as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail="Another collection operation is in progress; retry draw parsing later.")
+        client = BWFCorporateCalendarClient(settings)
+        try:
+            result = parse_captured_draw_document(session, document_id=document_id, client=client, settings=settings)
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        finally:
+            client.close()
+    return {"data": result, "meta": meta("BWF_CORPORATE_CALENDAR")}
+
+
 @router.post("/admin/draws/documents/{document_id}/parse", dependencies=[Depends(require_admin)])
 def parse_draw_document(document_id: str, payload: DrawParseRequest, session: DbSession) -> dict[str, Any]:
     """Stage parser output from the exact captured PDF hash for later reconciliation."""
@@ -658,6 +685,18 @@ def parse_draw_document(document_id: str, payload: DrawParseRequest, session: Db
     )
     session.commit()
     return {"data": {"topology_id": topology.id, "topology_status": topology.topology_status}, "meta": meta("BWF_CORPORATE_CALENDAR")}
+
+
+@router.get("/admin/draws/topologies/{topology_id}", dependencies=[Depends(require_admin)])
+def inspect_draw_topology(topology_id: str, session: DbSession) -> dict[str, Any]:
+    topology = session.get(OfficialDrawTopology, topology_id)
+    if topology is None:
+        raise HTTPException(status_code=404, detail="Official draw topology not found")
+    nodes = session.scalars(select(OfficialDrawNode).where(OfficialDrawNode.topology_id == topology_id).order_by(OfficialDrawNode.display_order)).all()
+    node_ids = [node.id for node in nodes]
+    reconciliations = session.scalars(select(OfficialDrawNodeReconciliation).where(OfficialDrawNodeReconciliation.node_id.in_(node_ids))).all() if node_ids else []
+    by_node = {item.node_id: item for item in reconciliations}
+    return {"data": {"topology_id": topology.id, "document_id": topology.document_id, "discipline": topology.discipline, "topology_status": topology.topology_status, "nodes": [{"node_id": node.id, "source_node_key": node.source_node_key, "round_label": node.round_label, "display_order": node.display_order, "participant_1_label": node.participant_1_label, "participant_2_label": node.participant_2_label, "reconciliation": ({"reconciliation_id": by_node[node.id].id, "match_id": by_node[node.id].match_id, "status": by_node[node.id].reconciliation_status, "rationale": by_node[node.id].rationale} if node.id in by_node else None)} for node in nodes]}, "meta": meta("REVIEWED_DRAW_RECONCILIATION")}
 
 
 @router.post("/admin/draws/nodes/{node_id}/reconcile", dependencies=[Depends(require_admin)])

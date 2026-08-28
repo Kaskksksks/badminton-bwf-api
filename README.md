@@ -129,7 +129,9 @@ Public endpoints use `/api/v1` and return consistent `data` plus `meta` envelope
 | `GET /api/v1/participants/{id}/interval-statistics` | Coverage-aware derived interval metrics |
 | `GET /api/v1/admin/import-batches` | Protected import status and counts |
 | `POST /api/v1/admin/rankings/run` | Protected one-shot authorised ranking ingestion |
-| `POST /api/v1/admin/draws/documents/{id}/parse` | Stage topology candidates from an exact captured-PDF hash |
+| `POST /api/v1/admin/draws/documents/{id}/collect-and-parse` | Re-fetch the exact captured PDF, verify its hash, and stage real BWF table candidates |
+| `POST /api/v1/admin/draws/documents/{id}/parse` | Stage topology candidates from an exact captured-PDF hash and supplied extracted text |
+| `GET /api/v1/admin/draws/topologies/{id}` | Inspect staged node IDs and reconciliation status |
 | `POST /api/v1/admin/draws/nodes/{id}/reconcile` | Record explicit reviewer-confirmed canonical-match linkage |
 | `POST /api/v1/admin/draws/topologies/{id}/publish` | Publish only a fully reconciled topology |
 | `POST /api/v1/admin/modeling/run` | Train/evaluate and publish eligible model outputs |
