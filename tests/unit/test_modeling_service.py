@@ -122,6 +122,18 @@ def test_model_readiness_reports_real_corpus_counts_without_writing_snapshots():
     assert snapshots == []
 
 
+def test_model_readiness_accepts_member_confirmed_historical_participants_when_legacy_wrapper_is_unresolved():
+    factory = make_session()
+    with factory.begin() as session:
+        _, participants, _ = add_fixture(session)
+        participants[0].identity_resolution_status = "UNRESOLVED"
+        readiness = model_readiness(session)
+
+    assert readiness["confirmed_participants"] == 2
+    assert readiness["approved_dated_validated_completed_matches"] == 10
+    assert readiness["publication_ready"] is True
+
+
 def test_model_pipeline_excludes_non_target_senior_tournament_history():
     factory = make_session()
     with factory.begin() as session:

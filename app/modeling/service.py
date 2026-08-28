@@ -54,7 +54,7 @@ def _confirmed_participant_ids(session: Session) -> set[str]:
     for participant in participants:
         members = by_participant.get(participant.id, [])
         expected = 2 if participant.participant_kind == "PAIR" else 1
-        if participant.identity_resolution_status == "CONFIRMED" and len(members) == expected and all(
+        if len(members) == expected and all(
             player_id is not None and identity_status == "CONFIRMED" for player_id, identity_status in members
         ):
             confirmed.add(participant.id)
@@ -160,7 +160,7 @@ def _upsert_model(session: Session, matches: list[Match], ratings: dict[str, flo
         model_status="ACTIVE",
         training_cutoff=cutoff,
         input_contract={
-            "source_scope": "confirmed participant identities and validated completed official matches",
+            "source_scope": "member-confirmed participant identities and validated completed official matches",
             "features": ["participant_elo_rating"],
             "initial_rating": 1500,
             "k_factor": 20,
