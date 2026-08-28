@@ -44,16 +44,18 @@ from app.api.v1.website_contract import (
     RankingSnapshotMeta,
     WebsiteTournamentListResponse,
     ModelContractResponse,
+    ActiveModelDetailsResponse,
     ModelReadinessResponse,
     OfficialBracketResponse,
     SeniorParticipantListResponse,
     WebsiteCalendarListResponse,
     WebsiteDrawDocumentListResponse,
     ForecastFieldAvailability,
+    WebsiteHeadToHeadResponse,
     WebsiteMatchForecastResponse,
     WebsiteTournamentSimulationResponse,
 )
-from app.api.v1.website_contract_service import active_senior_participants, approved_tournament_ids, calendar_entries, draw_documents, match_forecast_snapshot, model_contract, official_bracket, tournament_simulation_snapshot
+from app.api.v1.website_contract_service import active_model_details, active_senior_participants, approved_tournament_ids, calendar_entries, draw_documents, match_forecast_snapshot, model_contract, official_bracket, tournament_simulation_snapshot, validated_head_to_head_snapshot
 from app.modeling.service import model_readiness
 
 router = APIRouter(prefix="/website", tags=["website-integration"])
@@ -442,6 +444,30 @@ def get_tournament_simulation(calendar_entry_id: str, session: Session = Depends
 def get_model_contract(session: Session = Depends(get_db)) -> ModelContractResponse:
     """Expose model readiness without claiming forecasts, head-to-head, or simulations before evidence exists."""
     return ModelContractResponse(data=model_contract(session), meta=metadata())
+
+
+@router.get("/model-details", response_model=ActiveModelDetailsResponse)
+def get_active_model_details(session: Session = Depends(get_db)) -> ActiveModelDetailsResponse:
+    """Expose the persisted active-model methodology and walk-forward evaluation, without a model run."""
+    availability, model = active_model_details(session)
+    return ActiveModelDetailsResponse(availability=availability, model=model, meta=metadata("PLATFORM_MODEL"))
+
+
+@router.get("/head-to-head/{participant_a}/{participant_b}", response_model=WebsiteHeadToHeadResponse)
+def get_validated_head_to_head(
+    participant_a: str, participant_b: str, session: Session = Depends(get_db)
+) -> WebsiteHeadToHeadResponse:
+    """Expose only a validated immutable summary for the requested pair of participant IDs."""
+    availability, summary = validated_head_to_head_snapshot(
+        session, participant_a=participant_a, participant_b=participant_b
+    )
+    return WebsiteHeadToHeadResponse(
+        participant_a=participant_a,
+        participant_b=participant_b,
+        availability=availability,
+        summary=summary,
+        meta=metadata("PLATFORM_MODEL"),
+    )
 
 
 @router.get("/model-readiness", response_model=ModelReadinessResponse)

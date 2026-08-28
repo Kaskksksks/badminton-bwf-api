@@ -7,13 +7,15 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.api.v1.website_contract_service import active_senior_participants, calendar_entries, draw_documents, model_contract, official_bracket, tournament_simulation_snapshot
+from app.api.v1.website_contract_service import active_model_details, active_senior_participants, calendar_entries, draw_documents, model_contract, official_bracket, tournament_simulation_snapshot, validated_head_to_head_snapshot
 from app.db.base import Base, get_db
 from app.db.models import (
     DataSource,
     Event,
     Match,
     MatchParticipantContext,
+    ModelSnapshot,
+    HeadToHeadSnapshot,
     OfficialTournamentCalendarEntry,
     OfficialTournamentCalendarSnapshot,
     OfficialTournamentDocument,
@@ -137,6 +139,56 @@ def test_model_contracts_are_withheld_without_real_evidence() -> None:
     assert contract["predictions"].reason == "no_published_pre_match_forecast_snapshot"
     assert contract["head_to_head"].available is False
     assert contract["simulations"].available is False
+
+
+def test_read_only_model_and_head_to_head_contracts_return_only_validated_persisted_data() -> None:
+    factory = session_factory()
+    cutoff = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    with factory.begin() as session:
+        first = Participant(participant_kind="PLAYER", canonical_member_hash="first", display_name="First", identity_resolution_status="CONFIRMED")
+        second = Participant(participant_kind="PLAYER", canonical_member_hash="second", display_name="Second", identity_resolution_status="CONFIRMED")
+        session.add_all([first, second])
+        session.flush()
+        canonical_a, canonical_b = sorted((first.id, second.id))
+        session.add(ModelSnapshot(
+            model_key="walk-forward-elo",
+            model_version="v1+2026-08-22-10",
+            model_status="ACTIVE",
+            training_cutoff=cutoff,
+            input_contract={"source_scope": "approved", "features": ["participant_elo_rating"]},
+            calibration_status="EVALUATED",
+            evaluation_summary={"evaluation_method": "walk_forward_elo", "accuracy": 0.61, "brier_score": 0.22, "log_loss": 0.63},
+            methodology_reference="Stored deterministic walk-forward Elo baseline.",
+            activated_at=cutoff,
+        ))
+        session.add(HeadToHeadSnapshot(
+            participant_a_id=canonical_a,
+            participant_b_id=canonical_b,
+            input_cutoff=cutoff,
+            summary_status="VALIDATED",
+            eligible_meetings=3,
+            participant_a_wins=2,
+            participant_b_wins=1,
+            evidence={"match_ids": ["one", "two", "three"], "source_scope": "approved"},
+        ))
+        session.flush()
+
+        model_availability, model = active_model_details(session)
+        h2h_availability, summary = validated_head_to_head_snapshot(session, participant_a=first.id, participant_b=second.id)
+        unavailable, absent = validated_head_to_head_snapshot(session, participant_a=first.id, participant_b=first.id)
+
+    assert model_availability.available is True
+    assert model is not None
+    assert model.evaluation_summary["brier_score"] == 0.22
+    assert model.input_contract["features"] == ["participant_elo_rating"]
+    assert h2h_availability.available is True
+    assert summary is not None
+    assert summary.meetings == 3
+    assert summary.wins[first.id] + summary.wins[second.id] == summary.meetings
+    assert summary.evidence["match_ids"] == ["one", "two", "three"]
+    assert unavailable.available is False
+    assert unavailable.reason == "distinct_participants_required"
+    assert absent is None
 
 
 def test_tournament_simulation_contract_requires_a_canonical_calendar_link_and_published_reconciled_snapshot() -> None:

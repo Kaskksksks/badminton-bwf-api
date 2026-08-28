@@ -294,6 +294,41 @@ class ModelReadinessResponse(ContractModel):
     meta: ApiMeta
 
 
+class WebsiteHeadToHeadSnapshot(ContractModel):
+    participant_a: str
+    participant_b: str
+    meetings: int = Field(ge=0)
+    wins: dict[str, int]
+    input_cutoff: datetime
+    snapshot_status: Literal["VALIDATED"]
+    evidence: dict[str, object]
+
+
+class WebsiteHeadToHeadResponse(ContractModel):
+    participant_a: str
+    participant_b: str
+    availability: ContractAvailability
+    summary: WebsiteHeadToHeadSnapshot | None = None
+    meta: ApiMeta
+
+
+class ActiveModelDetails(ContractModel):
+    model_key: str
+    model_version: str
+    training_cutoff: datetime
+    activated_at: datetime
+    calibration_status: Literal["EVALUATED"]
+    methodology_reference: str
+    input_contract: dict[str, object]
+    evaluation_summary: dict[str, object]
+
+
+class ActiveModelDetailsResponse(ContractModel):
+    availability: ContractAvailability
+    model: ActiveModelDetails | None = None
+    meta: ApiMeta
+
+
 class ForecastFieldAvailability(ContractModel):
     """A single forecast display field; never contains a locally inferred value."""
 

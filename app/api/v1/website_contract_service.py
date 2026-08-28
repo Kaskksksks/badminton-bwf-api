@@ -8,8 +8,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.v1.website_contract import (
+    ActiveModelDetails,
     CalendarProvenance,
     ContractAvailability,
+    WebsiteHeadToHeadSnapshot,
     WebsiteMatchForecastSnapshot,
     WebsiteTournamentSimulationSnapshot,
     OfficialBracketNode,
@@ -227,6 +229,105 @@ def model_contract(session: Session) -> dict[str, ContractAvailability]:
         "head_to_head": ContractAvailability(available=bool(h2h_count), reason="validated_head_to_head_available" if h2h_count else "no_validated_head_to_head_snapshot", prerequisites=prerequisites + ["pair of confirmed active participants", "eligible completed match history"], eligible_record_count=h2h_count),
         "simulations": ContractAvailability(available=bool(models_ready and simulation_count), reason="published_tournament_simulation_available" if models_ready and simulation_count else "no_published_tournament_simulation_snapshot", prerequisites=prerequisites + ["published official draw topology", "validated reconciliation to canonical matches", "active evaluated model"], eligible_record_count=simulation_count),
     }
+
+
+def active_model_details(session: Session) -> tuple[ContractAvailability, ActiveModelDetails | None]:
+    """Return only the active, evaluated model's persisted public evaluation context."""
+    prerequisites = [
+        "active evaluated model snapshot",
+        "timestamped training cutoff",
+        "stored methodology reference",
+        "stored input contract",
+        "stored walk-forward evaluation summary",
+    ]
+    model = session.scalar(
+        select(ModelSnapshot)
+        .where(ModelSnapshot.model_status == "ACTIVE", ModelSnapshot.calibration_status == "EVALUATED")
+        .order_by(ModelSnapshot.training_cutoff.desc(), ModelSnapshot.activated_at.desc())
+    )
+    if (
+        model is None
+        or model.training_cutoff is None
+        or model.activated_at is None
+        or model.methodology_reference is None
+        or model.evaluation_summary is None
+    ):
+        return ContractAvailability(
+            available=False,
+            reason="no_active_evaluated_model_details",
+            prerequisites=prerequisites,
+            eligible_record_count=0,
+        ), None
+    return ContractAvailability(
+        available=True,
+        reason="active_evaluated_model_details_available",
+        prerequisites=prerequisites,
+        eligible_record_count=1,
+    ), ActiveModelDetails(
+        model_key=model.model_key,
+        model_version=model.model_version,
+        training_cutoff=model.training_cutoff,
+        activated_at=model.activated_at,
+        calibration_status="EVALUATED",
+        methodology_reference=model.methodology_reference,
+        input_contract=model.input_contract,
+        evaluation_summary=model.evaluation_summary,
+    )
+
+
+def validated_head_to_head_snapshot(
+    session: Session, *, participant_a: str, participant_b: str
+) -> tuple[ContractAvailability, WebsiteHeadToHeadSnapshot | None]:
+    """Expose only an immutable validated pairing summary; raw match history remains bounded elsewhere."""
+    prerequisites = [
+        "pair of distinct confirmed active participants",
+        "approved senior-only source scope",
+        "eligible completed match history",
+        "validated immutable head-to-head snapshot",
+        "timestamped input cutoff",
+    ]
+    if participant_a == participant_b:
+        return ContractAvailability(
+            available=False,
+            reason="distinct_participants_required",
+            prerequisites=prerequisites,
+            eligible_record_count=0,
+        ), None
+    canonical_a, canonical_b = sorted((participant_a, participant_b))
+    snapshot = session.scalar(
+        select(HeadToHeadSnapshot)
+        .where(
+            HeadToHeadSnapshot.participant_a_id == canonical_a,
+            HeadToHeadSnapshot.participant_b_id == canonical_b,
+            HeadToHeadSnapshot.summary_status == "VALIDATED",
+        )
+        .order_by(HeadToHeadSnapshot.input_cutoff.desc())
+    )
+    if snapshot is None:
+        return ContractAvailability(
+            available=False,
+            reason="no_validated_head_to_head_snapshot_for_pair",
+            prerequisites=prerequisites,
+            eligible_record_count=0,
+        ), None
+    wins = {
+        participant_a: snapshot.participant_a_wins if participant_a == canonical_a else snapshot.participant_b_wins,
+        participant_b: snapshot.participant_b_wins if participant_b == canonical_b else snapshot.participant_a_wins,
+    }
+    return ContractAvailability(
+        available=True,
+        reason="validated_head_to_head_snapshot_available",
+        prerequisites=prerequisites,
+        eligible_record_count=1,
+    ), WebsiteHeadToHeadSnapshot(
+        participant_a=participant_a,
+        participant_b=participant_b,
+        meetings=snapshot.eligible_meetings,
+        wins=wins,
+        input_cutoff=snapshot.input_cutoff,
+        snapshot_status="VALIDATED",
+        evidence=snapshot.evidence,
+    )
 
 
 def match_forecast_snapshot(session: Session, match_id: str) -> tuple[ContractAvailability, WebsiteMatchForecastSnapshot | None]:
