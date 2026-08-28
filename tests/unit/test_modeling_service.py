@@ -16,7 +16,7 @@ from app.db.models import (
     Player,
     Tournament,
 )
-from app.modeling.service import run_model_pipeline
+from app.modeling.service import model_readiness, run_model_pipeline
 
 
 def make_session():
@@ -106,6 +106,20 @@ def test_model_pipeline_publishes_evaluated_model_h2h_and_forecast():
     assert forecast is not None
     assert forecast.forecast_status == "PUBLISHED"
     assert forecast.participant_1_win_probability_bps + forecast.participant_2_win_probability_bps == 10000
+
+
+def test_model_readiness_reports_real_corpus_counts_without_writing_snapshots():
+    factory = make_session()
+    with factory.begin() as session:
+        add_fixture(session)
+        readiness = model_readiness(session)
+        snapshots = session.scalars(select(ModelSnapshot)).all()
+
+    assert readiness["publication_ready"] is True
+    assert readiness["approved_dated_validated_completed_matches"] == 10
+    assert readiness["confirmed_participants"] == 2
+    assert readiness["write_side_effects"] is False
+    assert snapshots == []
 
 
 def test_model_pipeline_excludes_non_target_senior_tournament_history():

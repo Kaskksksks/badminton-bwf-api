@@ -289,6 +289,11 @@ class ModelContractResponse(ContractModel):
     meta: ApiMeta
 
 
+class ModelReadinessResponse(ContractModel):
+    data: dict[str, object]
+    meta: ApiMeta
+
+
 class ForecastFieldAvailability(ContractModel):
     """A single forecast display field; never contains a locally inferred value."""
 

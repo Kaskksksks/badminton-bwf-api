@@ -71,6 +71,7 @@ def _training_matches(session: Session, confirmed_ids: set[str]) -> list[Match]:
         select(Match)
         .where(
             Match.status.in_(COMPLETED_STATUSES),
+            Match.match_date.is_not(None),
             Match.score_validation_status == "VALID",
             Match.winner_participant_id.is_not(None),
             Match.participant_1_id.in_(confirmed_ids),
@@ -79,6 +80,27 @@ def _training_matches(session: Session, confirmed_ids: set[str]) -> list[Match]:
         )
         .order_by(Match.match_date, Match.created_at, Match.id)
     ).all()
+
+
+def model_readiness(session: Session) -> dict[str, Any]:
+    """Summarise the real eligible corpus without training, publishing, or changing data."""
+
+    confirmed_ids = _confirmed_participant_ids(session)
+    matches = _training_matches(session, confirmed_ids)
+    dated_matches = [match for match in matches if match.match_date is not None]
+    event_ids = {match.event_id for match in dated_matches if match.event_id}
+    disciplines = sorted({event.event_type for event in session.scalars(select(Event).where(Event.id.in_(event_ids))).all()}) if event_ids else []
+    return {
+        "publication_ready": len(dated_matches) >= MIN_TRAINING_MATCHES,
+        "confirmed_participants": len(confirmed_ids),
+        "approved_dated_validated_completed_matches": len(dated_matches),
+        "minimum_matches_required": MIN_TRAINING_MATCHES,
+        "earliest_match_date": min((match.match_date for match in dated_matches), default=None),
+        "latest_match_date": max((match.match_date for match in dated_matches), default=None),
+        "event_types": disciplines,
+        "source_scope": "member-confirmed participants, approved senior tournaments, dated validated completed outcomes",
+        "write_side_effects": False,
+    }
 
 
 def _elo_probability(rating_a: float, rating_b: float) -> float:

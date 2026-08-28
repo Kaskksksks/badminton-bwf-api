@@ -44,6 +44,7 @@ from app.api.v1.website_contract import (
     RankingSnapshotMeta,
     WebsiteTournamentListResponse,
     ModelContractResponse,
+    ModelReadinessResponse,
     OfficialBracketResponse,
     SeniorParticipantListResponse,
     WebsiteCalendarListResponse,
@@ -53,6 +54,7 @@ from app.api.v1.website_contract import (
     WebsiteTournamentSimulationResponse,
 )
 from app.api.v1.website_contract_service import active_senior_participants, approved_tournament_ids, calendar_entries, draw_documents, match_forecast_snapshot, model_contract, official_bracket, tournament_simulation_snapshot
+from app.modeling.service import model_readiness
 
 router = APIRouter(prefix="/website", tags=["website-integration"])
 DbSession = Session
@@ -440,6 +442,12 @@ def get_tournament_simulation(calendar_entry_id: str, session: Session = Depends
 def get_model_contract(session: Session = Depends(get_db)) -> ModelContractResponse:
     """Expose model readiness without claiming forecasts, head-to-head, or simulations before evidence exists."""
     return ModelContractResponse(data=model_contract(session), meta=metadata())
+
+
+@router.get("/model-readiness", response_model=ModelReadinessResponse)
+def get_model_readiness(session: Session = Depends(get_db)) -> ModelReadinessResponse:
+    """Expose corpus readiness without training or publishing any model output."""
+    return ModelReadinessResponse(data=model_readiness(session), meta=metadata())
 
 
 @router.get("/tournaments/{tournament_id}/events", response_model=WebsiteEventListResponse)
