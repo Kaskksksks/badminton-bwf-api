@@ -44,7 +44,7 @@ from app.ingestion.calendar_draws.topology import (
     record_canonical_reconciliation,
     stage_topology_from_extracted_text,
 )
-from app.ingestion.rankings.service import synchronize_rankings
+from app.ingestion.rankings.service import diagnose_ranking_row_shape, synchronize_rankings
 from app.ingestion.player_profiles.service import (
     NO_EXACT_CANDIDATE_CASE_TYPE,
     NO_RECENT_SENIOR_ACTIVITY_CASE_TYPE,
@@ -633,6 +633,16 @@ def run_rankings_now(session: DbSession) -> dict[str, Any]:
         except Exception:
             session.rollback()
             raise
+    return {"data": summary, "meta": meta("BWF_OFFICIAL_RANKINGS")}
+
+
+@router.get("/admin/rankings/diagnostic", dependencies=[Depends(require_admin)])
+def diagnose_rankings_now() -> dict[str, Any]:
+    """Inspect key-only shape from one authorized senior ranking response without persisting it."""
+    with collection_slot("rankings_diagnostic") as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail="Another collection operation is in progress; retry the ranking diagnostic later.")
+        summary = diagnose_ranking_row_shape(settings=get_settings())
     return {"data": summary, "meta": meta("BWF_OFFICIAL_RANKINGS")}
 
 

@@ -361,6 +361,42 @@ def ensure_live_collection_allowed(settings: Settings) -> None:
         raise RuntimeError("BWF_RANKINGS_PERMISSION_REFERENCE is required before live collection")
 
 
+def diagnose_ranking_row_shape(settings: Settings | None = None, client: BWFRankingClient | None = None) -> dict[str, Any]:
+    """Return key-only diagnostics for one authorized senior ranking response without persisting it."""
+
+    settings = settings or get_settings()
+    ensure_live_collection_allowed(settings)
+    owns_client = client is None
+    client = client or BWFRankingClient(settings)
+    try:
+        scope = requested_scopes()[0]
+        publication_id, effective_date, published_week = extract_latest_publication(client.get_weeks(scope.ranking_id).payload)
+        response = client.get_table(scope, publication_id, page=1, draw_count=1)
+        rows, total_pages = extract_table_rows(response.payload)
+        if not rows:
+            raise ValueError("BWF ranking shape diagnostic found no rows")
+        first_row = rows[0]
+        nested_mapping_keys = {
+            str(key): sorted(str(nested_key) for nested_key in value.keys())
+            for key, value in first_row.items()
+            if isinstance(value, Mapping)
+        }
+        return {
+            "scope": scope.__dict__,
+            "publication_id": publication_id,
+            "effective_date": effective_date.isoformat() if effective_date else None,
+            "published_week": published_week,
+            "response_url": response.url,
+            "row_count_on_first_page": len(rows),
+            "total_pages": total_pages,
+            "row_keys": sorted(str(key) for key in first_row.keys()),
+            "nested_mapping_keys": nested_mapping_keys,
+        }
+    finally:
+        if owns_client:
+            client.close()
+
+
 def synchronize_rankings(session: Session, settings: Settings | None = None, client: BWFRankingClient | None = None) -> dict[str, int | str]:
     """Fetch and store the ten requested senior ranking scopes as immutable snapshots."""
 

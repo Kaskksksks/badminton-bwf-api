@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.db.base import Base
 from app.db.models import RankingEntry, RankingSnapshot
-from app.ingestion.rankings.service import SourceResponse, synchronize_rankings
+from app.ingestion.rankings.service import SourceResponse, diagnose_ranking_row_shape, synchronize_rankings
 from app.polling import scheduler as scheduler_module
 
 
@@ -94,6 +94,14 @@ def test_live_collection_is_refused_without_explicit_enablement() -> None:
     with Session(engine) as session:
         with pytest.raises(RuntimeError, match="collection is disabled"):
             synchronize_rankings(session, settings=Settings(database_url="sqlite+pysqlite:///:memory:"), client=FakeRankingClient())
+
+
+def test_ranking_shape_diagnostic_returns_keys_without_persisting_rows() -> None:
+    result = diagnose_ranking_row_shape(settings=authorised_settings(), client=FakeRankingClient())
+    assert result["scope"]["discipline"] == "MS"
+    assert result["row_count_on_first_page"] == 1
+    assert result["row_keys"] == ["change", "countryCode", "name", "playerId", "points", "rank", "tournaments"]
+    assert result["nested_mapping_keys"] == {}
 
 
 def test_scheduler_adds_separate_tuesday_utc_rankings_job(monkeypatch) -> None:
