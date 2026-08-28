@@ -1,0 +1,64 @@
+Shared context — paste this before every role prompt
+You are contributing to a new independent website named BWF // Supercomputer. It is an evidence-bounded badminton intelligence control room, not a decorative sports dashboard.
+
+The authoritative provider repository is:
+
+`https://github.com/Kaskksksks/badminton-bwf-api`
+
+The deployed provider base URL is:
+
+`https://badminton-bwf-api.onrender.com/api/v1`
+
+The reference website is:
+
+`https://specwebsite-yddqzdn4.manus.space/`
+
+The provider is the canonical source of truth for players, pairs, matches, tournaments, scores, games, live states, rankings, draw documents, model snapshots, forecasts, and simulations. The website must not create a browser-side shadow sports database.
+
+Non-negotiable rules
+	1.	Inspect the actual repository, current main branch, deployed responses, and existing project files before guessing anything. Never invent endpoint names, response fields, database tables, model values, sporting records, or provider capabilities.
+	2.	All browser requests must call the website server. The website server calls the badminton provider. Keep `BADMINTON_API_BASE_URL` server-side. Never expose provider credentials, Render values, Neon connection values, or API keys in browser code.
+	3.	Use only the approved BWF Corporate calendar and direct BWF draw-document metadata emitted from that calendar. Do not scrape BWF pages in the browser. Do not use Tournament Software, unofficial feeds, inferred endpoints, or decorative sample sporting records.
+	4.	Preserve the provider’s senior-only classifier. Exclude junior/U-age, Para, International Challenge, International Series, Future Series, Continental Team Championships, World Team Championships, and unrecognised categories before public delivery. Reuse the provider classifier instead of duplicating a weaker browser rule.
+	5.	Preserve the provider’s calendar cadence, live-worker cadence, source budgets, locks, OOM safeguards, and collector behavior. A public read endpoint must never trigger a collector.
+	6.	Empty, missing, partial, stale, unsupported, malformed, timeout, 429, 502, and 503 conditions must remain explicit. Use precise `loading`, `available`, `partial`, `withheld`, `unavailable`, and `error` states. Never fill a gap with an invented value.
+	7.	Completed official results supersede forecasts. Live scores must show their source timestamp and partial-score caveat. Scheduled matches without scores must show an unplayed state such as `VS`.
+	8.	Never infer brackets from match rows. A bracket is public only when the provider returns a parser-validated, fully reconciled official topology.
+	9.	Never display rankings, form, Elo, probability, confidence, evidence contributors, uncertainty, analyst conclusions, accuracy metrics, or simulations unless the provider has returned the required validated contract.
+	10.	Distinguish website implementation from provider production activation. Do not claim that migrations, schedulers, model activation, PDF reconciliation, forecasts, or simulations are live merely because code or migration files exist.
+	11.	Do not change Render or Neon environment variables. Do not perform destructive Git operations, force pushes, resets, or production changes without explicit user authorization.
+	12.	Use English in code comments, interface text, documentation, status messages, and handoff notes.
+
+Required handoff behavior
+Before editing, read any existing `PROJECT_STATUS.md`, `CONTRACT_PACK.md`, `TODO.md`, `activation-guide.md`, `release-verification.md`, and prior `HANDOFF_*.md` files.
+
+After editing, update or create:
+
+	•	`PROJECT_STATUS.md`: current branch, project state, known provider state, and next recommended action.
+	•	`TODO.md`: checked only for work actually completed; external provider activation remains unchecked unless verified.
+	•	A role-specific handoff file named `HANDOFF_<stage>_<role>.md`.
+
+Every handoff must state the files changed, commands run, actual test results, provider endpoints inspected, assumptions avoided, unresolved blockers, and exact next steps. Do not write “complete” when only a placeholder or typed integration point exists.
+
+Required shared contract vocabulary
+Use these concepts consistently:
+
+	•	`MatchScope = "all" | "live" | "scheduled" | "completed"`
+	•	`CapabilityState = "available" | "partial" | "withheld" | "unavailable" | "error"`
+	•	`Discipline = "MS" | "WS" | "MD" | "WD" | "XD" | "UNKNOWN"`
+	•	`ProviderMeta`, `ProviderHealth`, `Capability`, `DataStatus`, `Participant`, `Member`, `GameScore`, `LiveState`, `TournamentSummary`, `MatchRecord`, `CalendarEntry`, `DrawDocument`, `ActiveParticipant`, `BracketNode`, `OfficialBracket`, `ModelContract`, `MatchForecastResponse`, and `TournamentSimulationResponse` must preserve nulls and upstream provenance.
+
+Required website-facing provider routes, subject to actual repository/schema verification, are:
+
+	•	`GET /api/v1/website/calendar`
+	•	`GET /api/v1/website/calendar/{calendar_entry_id}/draw-documents`
+	•	`GET /api/v1/website/active-participants`
+	•	`GET /api/v1/website/calendar/{calendar_entry_id}/brackets/{discipline}`
+	•	`GET /api/v1/website/model-contract`
+	•	`GET /api/v1/website/matches/{match_id}/forecast`
+	•	`GET /api/v1/website/calendar/{calendar_entry_id}/simulation`
+
+Also inspect, but do not assume active or complete, the provider’s health, data-status, capabilities, normalized match, live, player, tournament, ranking, game, and historical-evidence routes.
+
+Definition of quality
+A high-quality implementation is accurate about both what it knows and what it does not know. It preserves source provenance, validates identity and scores, separates independent endpoint failures, keeps secrets server-side, passes real tests, works on desktop and mobile, and visibly explains why unsupported intelligence is withheld.
