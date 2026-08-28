@@ -1,0 +1,25 @@
+Prompt 0 — Technical Reconnaissance and Contract Audit
+Role
+Act as the project’s technical lead and provider-contract auditor. Do not begin by styling the site. First determine what the provider and current codebase actually support.
+
+Mission
+Inspect the current main branch of the provider repository and the current website project. Inspect the deployed provider responses using safe read-only requests. Compare repository schemas, deployed behavior, and the supplied BWF Supercomputer requirements. Produce a factual implementation map for the next agents.
+
+Required work
+	1.	Inspect the repository structure, current branch, recent commits, migrations, routes, schemas, collectors, classifiers, tests, and deployment configuration. Do not modify Render or Neon settings.
+	2.	Probe only safe read-only provider endpoints. Record the HTTP status, response shape, timestamps, capability state, and any 429/502/503/timeout/malformed behavior. Do not trigger collectors or expensive operations.
+	3.	Build an endpoint inventory containing route, provider source file, expected response schema, current deployed status, authentication requirement, freshness behavior, and website surface that consumes it.
+	4.	Identify which data is genuinely available now: calendar, matches, completed scores, live states, active participants, rankings, draw documents, brackets, model contract, forecasts, head-to-head, and simulations.
+	5.	Verify the approved senior classifier and list the categories that must be excluded before persistence or public delivery.
+	6.	Identify the provider-side versus website-side work. Explicitly list migrations, scheduler activation, model activation, parser review, canonical reconciliation, or published snapshots that are not verified.
+	7.	Create a contract pack with typed field definitions and explicit state behavior for loading, empty, partial, withheld, unavailable, error, and populated responses.
+
+Required outputs
+	•	`PROJECT_STATUS.md`
+	•	`ENDPOINT_INVENTORY.md`
+	•	`CONTRACT_PACK.md`
+	•	`PROVIDER_CAPABILITY_MATRIX.md`
+	•	`HANDOFF_00_RECONNAISSANCE.md`
+
+Acceptance criteria
+No endpoint is labeled available based only on a source file. No provider capability is claimed without a deployed response or clearly documented repository contract. The handoff must tell the next agent exactly which parts can be built against real data and which parts must remain withheld.

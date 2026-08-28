@@ -1,0 +1,86 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "jkcge0vVnj2qayKqtTQgh"
+uri = "file://PROJECT_STATUS.md"
+type = "text"
+title = "Project status audit"
+description = "Verified project and deployed-provider status for BWF // Supercomputer."
+logical_id = "fdefe0f0-4318-4eaf-9a8d-2967138dd201"
+content_hash = "sha256:4c715470a4b32cf23ce76fe749b7a52ef4c454e322115b5ef3c066198daa41cc"
+size = 6741
+mtime_ms = 1787887528643
+storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:67553dd3-ab9f-4a7c-ae46-30b910076cc6/fdefe0f0-4318-4eaf-9a8d-2967138dd201/df8a3fb5-5fea-4f15-8bad-6f6ef5a218b7"
+storage_version_token = "1787887622650302"
+content_type = "text/markdown"
+
+[[outputs]]
+id = "wVMCjPxkGhUCE_q5THv1b"
+uri = "file://ENDPOINT_INVENTORY.md"
+type = "text"
+title = "Provider endpoint inventory"
+description = "Website-facing routes, schemas, live observations, and integration boundaries."
+logical_id = "719f5184-bfde-4045-b0be-f90bf291c01b"
+content_hash = "sha256:469a38c08e48789d3dc3c8300fb968bd7b0cc99a2de7fd160e942b5301ef04bd"
+size = 10958
+mtime_ms = 1787887546189
+storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:67553dd3-ab9f-4a7c-ae46-30b910076cc6/719f5184-bfde-4045-b0be-f90bf291c01b/e1370182-88d5-4d31-b773-2187c3887a9f"
+storage_version_token = "1787887624047484"
+content_type = "text/markdown"
+
+[[outputs]]
+id = "kAOqhvW6ZohoNzD7y57hn"
+uri = "file://CONTRACT_PACK.md"
+type = "text"
+title = "Website contract pack"
+description = "Typed data contracts, provenance rules, and explicit UI state behavior."
+logical_id = "5bcee50c-1199-4682-bbca-964c0ecc0db6"
+content_hash = "sha256:fb88f892e9b6dc7e1b5677f77ea12ae0a5f9ea05206d03ab84e1f4950b44d5c3"
+size = 11875
+mtime_ms = 1787887564684
+storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:67553dd3-ab9f-4a7c-ae46-30b910076cc6/5bcee50c-1199-4682-bbca-964c0ecc0db6/e160d0b0-d25d-4cdb-850e-de76238df653"
+storage_version_token = "1787887625456359"
+content_type = "text/markdown"
+
+[[outputs]]
+id = "iFPazcT5bLel9Z1R7fGjv"
+uri = "file://PROVIDER_CAPABILITY_MATRIX.md"
+type = "text"
+title = "Provider capability matrix"
+description = "Available, partial, withheld, unavailable, and unverified provider capabilities."
+logical_id = "49de66dc-b0a6-45e7-8b4d-4796bee842b1"
+content_hash = "sha256:3e3b9a9976aa32ab2368765e752d0212f0a4b11aaf12e253acedf9a48d8ec79d"
+size = 7200
+mtime_ms = 1787887577562
+storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:67553dd3-ab9f-4a7c-ae46-30b910076cc6/49de66dc-b0a6-45e7-8b4d-4796bee842b1/795ead92-1bda-457f-b71d-89e4e2d89ea8"
+storage_version_token = "1787887626791073"
+content_type = "text/markdown"
+
+[[outputs]]
+id = "TfnU9H-_Nx45Ssss66oa8"
+uri = "file://HANDOFF_00_RECONNAISSANCE.md"
+type = "text"
+title = "Reconnaissance handoff"
+description = "Implementation handoff with evidence, validation results, blockers, and next steps."
+logical_id = "d044417e-e7bd-4b09-8894-94a7a7914f14"
+content_hash = "sha256:809eb536279d9f4fb6508bcae255fd64b9d9d7fa2281126825de7c508991c0fb"
+size = 6915
+mtime_ms = 1787887592512
+storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:67553dd3-ab9f-4a7c-ae46-30b910076cc6/d044417e-e7bd-4b09-8894-94a7a7914f14/3298215d-86e8-4fea-a173-e783531a6f00"
+storage_version_token = "1787887628173340"
+content_type = "text/markdown"
+
+[[outputs]]
+id = "9XY_kC2UigzMWjrFY1Qvq"
+uri = "file://TODO.md"
+type = "text"
+title = "Audit TODO"
+description = "Verified completed work and remaining provider and website actions."
+logical_id = "c6f5cef5-a6a4-4db1-a3ce-b65678db8c83"
+content_hash = "sha256:fdf28127faa5af462e923c47aec3657a5b73f5f90830aafc1a41404b7344168b"
+size = 1942
+mtime_ms = 1787887580594
+storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:67553dd3-ab9f-4a7c-ae46-30b910076cc6/c6f5cef5-a6a4-4db1-a3ce-b65678db8c83/d63e9e62-9d89-4757-8076-1b732718885f"
+storage_version_token = "1787887629573815"
+content_type = "text/markdown"
