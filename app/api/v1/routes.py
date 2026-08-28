@@ -637,12 +637,12 @@ def run_rankings_now(session: DbSession) -> dict[str, Any]:
 
 
 @router.get("/admin/rankings/diagnostic", dependencies=[Depends(require_admin)])
-def diagnose_rankings_now() -> dict[str, Any]:
+def diagnose_rankings_now(discipline: Annotated[str, Query(pattern="^(MS|WS|MD|WD|XD)$")] = "MS") -> dict[str, Any]:
     """Inspect key-only shape from one authorized senior ranking response without persisting it."""
     with collection_slot("rankings_diagnostic") as acquired:
         if not acquired:
             raise HTTPException(status_code=409, detail="Another collection operation is in progress; retry the ranking diagnostic later.")
-        summary = diagnose_ranking_row_shape(settings=get_settings())
+        summary = diagnose_ranking_row_shape(discipline=discipline, settings=get_settings())
     return {"data": summary, "meta": meta("BWF_OFFICIAL_RANKINGS")}
 
 

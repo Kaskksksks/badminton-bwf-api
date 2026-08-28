@@ -104,6 +104,11 @@ def test_ranking_shape_diagnostic_returns_keys_without_persisting_rows() -> None
     assert result["nested_mapping_keys"] == {}
 
 
+def test_ranking_shape_diagnostic_can_target_an_authorized_senior_discipline() -> None:
+    result = diagnose_ranking_row_shape(discipline="XD", settings=authorised_settings(), client=FakeRankingClient())
+    assert result["scope"]["discipline"] == "XD"
+
+
 def test_scheduler_adds_separate_tuesday_utc_rankings_job(monkeypatch) -> None:
     monkeypatch.setattr(scheduler_module, "get_settings", lambda: authorised_settings())
     scheduler = scheduler_module.build_scheduler()

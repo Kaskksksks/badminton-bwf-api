@@ -361,7 +361,9 @@ def ensure_live_collection_allowed(settings: Settings) -> None:
         raise RuntimeError("BWF_RANKINGS_PERMISSION_REFERENCE is required before live collection")
 
 
-def diagnose_ranking_row_shape(settings: Settings | None = None, client: BWFRankingClient | None = None) -> dict[str, Any]:
+def diagnose_ranking_row_shape(
+    discipline: str = "MS", settings: Settings | None = None, client: BWFRankingClient | None = None
+) -> dict[str, Any]:
     """Return key-only diagnostics for one authorized senior ranking response without persisting it."""
 
     settings = settings or get_settings()
@@ -369,7 +371,16 @@ def diagnose_ranking_row_shape(settings: Settings | None = None, client: BWFRank
     owns_client = client is None
     client = client or BWFRankingClient(settings)
     try:
-        scope = requested_scopes()[0]
+        scope = next(
+            (
+                candidate
+                for candidate in requested_scopes()
+                if candidate.ranking_system == "WORLD" and candidate.discipline == discipline
+            ),
+            None,
+        )
+        if scope is None:
+            raise ValueError(f"unsupported ranking diagnostic discipline: {discipline}")
         publication_id, effective_date, published_week = extract_latest_publication(client.get_weeks(scope.ranking_id).payload)
         response = client.get_table(scope, publication_id, page=1, draw_count=1)
         rows, total_pages = extract_table_rows(response.payload)
