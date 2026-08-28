@@ -225,6 +225,16 @@ def _publish_forecasts(session: Session, model: ModelSnapshot, ratings: dict[str
 
 def _publish_h2h_snapshots(session: Session, confirmed_ids: set[str], matches: list[Match]) -> int:
     grouped: dict[tuple[str, str], list[Match]] = defaultdict(list)
+    existing_keys = {
+        (participant_a_id, participant_b_id, input_cutoff)
+        for participant_a_id, participant_b_id, input_cutoff in session.execute(
+            select(
+                HeadToHeadSnapshot.participant_a_id,
+                HeadToHeadSnapshot.participant_b_id,
+                HeadToHeadSnapshot.input_cutoff,
+            )
+        ).all()
+    }
     for match in matches:
         if not match.participant_1_id or not match.participant_2_id:
             continue
@@ -238,11 +248,8 @@ def _publish_h2h_snapshots(session: Session, confirmed_ids: set[str], matches: l
         if not dated:
             continue
         cutoff = datetime(max(dated).year, max(dated).month, max(dated).day, tzinfo=timezone.utc)
-        if session.scalar(select(HeadToHeadSnapshot.id).where(
-            HeadToHeadSnapshot.participant_a_id == a,
-            HeadToHeadSnapshot.participant_b_id == b,
-            HeadToHeadSnapshot.input_cutoff == cutoff,
-        )):
+        snapshot_key = (a, b, cutoff)
+        if snapshot_key in existing_keys:
             continue
         a_wins = sum(item.winner_participant_id == a for item in meetings)
         b_wins = sum(item.winner_participant_id == b for item in meetings)
@@ -256,6 +263,7 @@ def _publish_h2h_snapshots(session: Session, confirmed_ids: set[str], matches: l
             participant_b_wins=b_wins,
             evidence={"match_ids": [item.id for item in meetings], "source_scope": "validated completed official matches"},
         ))
+        existing_keys.add(snapshot_key)
         created += 1
     return created
 
