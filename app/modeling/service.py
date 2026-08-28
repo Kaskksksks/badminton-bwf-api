@@ -225,6 +225,14 @@ def _publish_forecasts(session: Session, model: ModelSnapshot, ratings: dict[str
 
 def _publish_h2h_snapshots(session: Session, confirmed_ids: set[str], matches: list[Match]) -> int:
     grouped: dict[tuple[str, str], list[Match]] = defaultdict(list)
+    active_cutoff = utcnow().date().replace(year=utcnow().year - 1)
+    active_ids = {
+        participant_id
+        for match in matches
+        if match.match_date and match.match_date >= active_cutoff
+        for participant_id in (match.participant_1_id, match.participant_2_id)
+        if participant_id is not None
+    }
     existing_keys = {
         (participant_a_id, participant_b_id, input_cutoff)
         for participant_a_id, participant_b_id, input_cutoff in session.execute(
@@ -242,7 +250,7 @@ def _publish_h2h_snapshots(session: Session, confirmed_ids: set[str], matches: l
         grouped[(a, b)].append(match)
     created = 0
     for (a, b), meetings in grouped.items():
-        if a not in confirmed_ids or b not in confirmed_ids:
+        if a not in confirmed_ids or b not in confirmed_ids or a not in active_ids or b not in active_ids:
             continue
         dated = [item.match_date for item in meetings if item.match_date]
         if not dated:
