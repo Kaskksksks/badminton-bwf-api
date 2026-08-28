@@ -918,6 +918,28 @@ def get_interval_statistics(participant_id: str, session: DbSession) -> dict[str
 
 
 @router.get("/admin/import-batches")
-def list_import_batches(session: DbSession, _: None = Depends(require_admin)) -> dict[str, Any]:
-    values = session.scalars(select(ImportBatch).order_by(desc(ImportBatch.started_at))).all()
-    return {"data": [{"id": value.id, "status": value.status, "input_row_count": value.input_row_count, "accepted_count": value.accepted_count, "duplicate_count": value.duplicate_count, "rejected_count": value.rejected_count} for value in values], "meta": meta()}
+def list_import_batches(
+    session: DbSession,
+    _: None = Depends(require_admin),
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+) -> dict[str, Any]:
+    """Return bounded administrative batch metadata; source rows and credentials remain unavailable."""
+    values = session.scalars(select(ImportBatch).order_by(desc(ImportBatch.started_at)).limit(limit)).all()
+    return {
+        "data": [
+            {
+                "id": value.id,
+                "batch_type": value.batch_type,
+                "status": value.status,
+                "started_at": value.started_at.isoformat() if value.started_at else None,
+                "completed_at": value.completed_at.isoformat() if value.completed_at else None,
+                "input_row_count": value.input_row_count,
+                "accepted_count": value.accepted_count,
+                "duplicate_count": value.duplicate_count,
+                "rejected_count": value.rejected_count,
+                "error_summary": value.error_summary,
+            }
+            for value in values
+        ],
+        "meta": meta(),
+    }
