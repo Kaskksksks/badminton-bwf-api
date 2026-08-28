@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.db.base import Base
 from app.db.models import RankingEntry, RankingSnapshot
-from app.ingestion.rankings.service import SourceResponse, diagnose_ranking_row_shape, synchronize_rankings
+from app.ingestion.rankings.service import RankingScope, SourceResponse, diagnose_ranking_row_shape, normalize_row, synchronize_rankings
 from app.polling import scheduler as scheduler_module
 
 
@@ -107,6 +107,53 @@ def test_ranking_shape_diagnostic_returns_keys_without_persisting_rows() -> None
 def test_ranking_shape_diagnostic_can_target_an_authorized_senior_discipline() -> None:
     result = diagnose_ranking_row_shape(discipline="XD", settings=authorised_settings(), client=FakeRankingClient())
     assert result["scope"]["discipline"] == "XD"
+
+
+def test_normalizes_current_bwf_single_and_doubles_model_fields_without_name_inference() -> None:
+    singles = normalize_row(
+        RankingScope("WORLD", "SENIOR", 2, 6, "MS"),
+        {
+            "rank": 1,
+            "points": 10000,
+            "rank_change": 2,
+            "player1_id": 99,
+            "player1_model": {"id": 99, "name_display_bold": "Source Singles Name"},
+            "p1_country_model": {"name": "TST"},
+        },
+    )
+    doubles = normalize_row(
+        RankingScope("WORLD", "SENIOR", 2, 6, "MD"),
+        {
+            "rank": 1,
+            "points": 10000,
+            "team_id": 88,
+            "player1_model": {"id": 11, "name_display_bold": "Source Player One"},
+            "player2_model": {"id": 12, "name_display_bold": "Source Player Two"},
+            "p1_country_model": {"name": "TST"},
+            "p2_country_model": {"name": "TST"},
+        },
+    )
+    assert singles["subject_display_name"] == "Source Singles Name"
+    assert singles["official_subject_id"] == "99"
+    assert doubles["subject_display_name"] == "Source Player One / Source Player Two"
+    assert doubles["official_subject_id"] == "88"
+    assert doubles["country_code"] == "TST"
+
+
+def test_omits_ambiguous_doubles_country_from_current_bwf_model_fields() -> None:
+    row = normalize_row(
+        RankingScope("WORLD", "SENIOR", 2, 6, "XD"),
+        {
+            "rank": 1,
+            "points": 10000,
+            "team_id": 88,
+            "player1_model": {"name_display_bold": "Source Player One"},
+            "player2_model": {"name_display_bold": "Source Player Two"},
+            "p1_country_model": {"name": "AAA"},
+            "p2_country_model": {"name": "BBB"},
+        },
+    )
+    assert row["country_code"] is None
 
 
 def test_scheduler_adds_separate_tuesday_utc_rankings_job(monkeypatch) -> None:

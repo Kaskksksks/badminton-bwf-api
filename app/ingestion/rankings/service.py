@@ -235,11 +235,30 @@ def normalize_row(scope: RankingScope, row: Mapping[str, Any]) -> dict[str, Any]
     tournaments = parse_int(first_present(row, "tournaments", "tournamentCount", "totalTournament"))
     change = parse_int(first_present(row, "change", "rankChange", "change_rank"))
     player = as_mapping(first_present(row, "player", "athlete", "participant"))
-    display_name = first_present(row, "name", "playerName", "player_name", "displayName", "pairName") or first_present(player, "name", "fullName", "displayName")
+    player_one = as_mapping(first_present(row, "player1_model", "playerOne", "player_1"))
+    player_two = as_mapping(first_present(row, "player2_model", "playerTwo", "player_2"))
+    direct_display_name = first_present(row, "name", "playerName", "player_name", "displayName", "pairName") or first_present(
+        player, "name", "fullName", "displayName"
+    )
+    player_one_name = first_present(player_one, "name", "fullName", "displayName", "name_display_bold")
+    player_two_name = first_present(player_two, "name", "fullName", "displayName", "name_display_bold")
+    display_name = direct_display_name
+    if display_name is None and scope.is_doubles:
+        pair_names = [name.strip() for name in (player_one_name, player_two_name) if isinstance(name, str) and name.strip()]
+        display_name = " / ".join(pair_names) if len(pair_names) == 2 else None
+    if display_name is None:
+        display_name = player_one_name
     if not isinstance(display_name, str) or not display_name.strip():
         raise ValueError("BWF ranking row rejected: display name required")
-    official_id = first_present(row, "playerId", "player_id", "bwfId", "bwf_id", "id") or first_present(player, "id", "playerId", "bwfId")
-    country = first_present(row, "countryCode", "country_code", "country", "nation") or first_present(player, "countryCode", "country")
+    official_id = first_present(row, "team_id", "teamId") if scope.is_doubles else None
+    official_id = official_id or first_present(row, "playerId", "player_id", "player1_id", "bwfId", "bwf_id", "id") or first_present(
+        player, "id", "playerId", "bwfId"
+    ) or first_present(player_one, "id", "playerId", "bwfId")
+    country_one = first_present(row, "countryCode", "country_code", "country", "nation") or first_present(
+        player, "countryCode", "country"
+    ) or first_present(as_mapping(row.get("p1_country_model")), "code", "countryCode", "name")
+    country_two = first_present(as_mapping(row.get("p2_country_model")), "code", "countryCode", "name")
+    country = country_one if not scope.is_doubles or country_one == country_two else None
     subject_kind = "PAIR" if scope.is_doubles else "PLAYER"
     subject_key = str(official_id) if official_id is not None else f"{scope.discipline}:{display_name.strip().upper()}:{country or ''}"
     return {
