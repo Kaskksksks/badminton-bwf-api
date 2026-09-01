@@ -1,7 +1,0 @@
-pyproject.toml
-app/core/config.py
-badminton_data_platform.egg-info/PKG-INFO
-badminton_data_platform.egg-info/SOURCES.txt
-badminton_data_platform.egg-info/dependency_links.txt
-badminton_data_platform.egg-info/requires.txt
-badminton_data_platform.egg-info/top_level.txt

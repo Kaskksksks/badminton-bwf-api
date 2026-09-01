@@ -1,0 +1,20 @@
+{
+  "name": "badminton-bwf-api",
+  "version": "1.0.0",
+  "description": "Provenance-aware historical badminton data and BWF live-ingestion API.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "postinstall": "cd client && npm install --include=dev",
+    "dev": "concurrently \"node server.js\" \"cd client && npm run dev\"",
+    "start": "node server.js",
+    "build": "cd client && npm install --include=dev && npm run build"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
